@@ -16,9 +16,9 @@ use std::fmt;
 use std::str::pattern::{Pattern, Searcher, SearchStep};
 use std::str::FromStr;
 
+use nfa::{CaptureLocs, MatchKind, Nfa};
 use program::Program;
 use syntax;
-use vm::{CaptureLocs, MatchKind, Nfa};
 
 use self::NamesIter::*;
 

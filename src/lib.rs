@@ -408,8 +408,8 @@ mod compile;
 mod input;
 mod pool;
 mod program;
+mod nfa;
 mod re;
-mod vm;
 
 /// The `native` module exists to support the `regex!` macro. Do not use.
 #[doc(hidden)]
@@ -431,7 +431,7 @@ pub mod native {
     // documentation.
     pub use program::{Inst, Program};
     pub use syntax::simple_case_fold;
+    pub use nfa::MatchKind::{self, Exists, Location, Submatches};
     pub use re::ExNative;
     pub use re::Regex::{Dynamic, Native};
-    pub use vm::MatchKind::{self, Exists, Location, Submatches};
 }

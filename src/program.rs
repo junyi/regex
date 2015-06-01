@@ -15,8 +15,8 @@ use syntax;
 use Error;
 use char::Char;
 use compile::Compiler;
+use nfa::NfaThreads;
 use pool::Pool;
-use vm::NfaThreads;
 
 pub type InstIdx = usize;
 

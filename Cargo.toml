@@ -15,6 +15,10 @@ An implementation of regular expressions for Rust.
 path = "regex_macros/tests/test_dynamic.rs"
 name = "all"
 
+[[test]]
+path = "regex_macros/benches/shootout-regex-dna.rs"
+name = "shootout_regex_dna"
+
 [[bench]]
 name = "all"
 path = "regex_macros/benches/bench_dynamic.rs"

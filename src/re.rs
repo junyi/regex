@@ -16,14 +16,11 @@ use std::fmt;
 use std::str::pattern::{Pattern, Searcher, SearchStep};
 use std::str::FromStr;
 
-use compile::Program;
+use program::Program;
 use syntax;
-use vm;
-use vm::CaptureLocs;
-use vm::MatchKind::{self, Exists, Location, Submatches};
+use vm::{CaptureLocs, MatchKind, Nfa};
 
 use self::NamesIter::*;
-use self::Regex::*;
 
 /// Escapes all regular expression meta characters in `text`.
 ///
@@ -166,18 +163,9 @@ pub enum Regex {
     // See the comments for the `program` module in `lib.rs` for a more
     // detailed explanation for what `regex!` requires.
     #[doc(hidden)]
-    Dynamic(ExDynamic),
+    Dynamic(Program),
     #[doc(hidden)]
     Native(ExNative),
-}
-
-#[derive(Clone)]
-#[doc(hidden)]
-pub struct ExDynamic {
-    original: String,
-    names: Vec<Option<String>>,
-    #[doc(hidden)]
-    pub prog: Program
 }
 
 #[doc(hidden)]
@@ -187,7 +175,7 @@ pub struct ExNative {
     #[doc(hidden)]
     pub names: &'static &'static [Option<&'static str>],
     #[doc(hidden)]
-    pub prog: fn(MatchKind, &str, usize, usize) -> Vec<Option<usize>>
+    pub prog: fn(MatchKind, &str, usize) -> Vec<Option<usize>>
 }
 
 impl Copy for ExNative {}
@@ -250,13 +238,7 @@ impl Regex {
     ///
     /// The default size limit used in `new` is 10MB.
     pub fn with_size_limit(size: usize, re: &str) -> Result<Regex, Error> {
-        let ast = try!(syntax::Expr::parse(re));
-        let (prog, names) = try!(Program::new(ast, size));
-        Ok(Dynamic(ExDynamic {
-            original: re.to_string(),
-            names: names,
-            prog: prog,
-        }))
+        Program::new(size, re).map(Regex::Dynamic)
     }
 
 
@@ -271,12 +253,11 @@ impl Regex {
     /// # extern crate regex; use regex::Regex;
     /// # fn main() {
     /// let text = "I categorically deny having triskaidekaphobia.";
-    /// let matched = Regex::new(r"\b\w{13}\b").unwrap().is_match(text);
-    /// assert!(matched);
+    /// assert!(Regex::new(r"\b\w{13}\b").unwrap().is_match(text));
     /// # }
     /// ```
     pub fn is_match(&self, text: &str) -> bool {
-        has_match(&exec(self, Exists, text))
+        has_match(&exec(self, MatchKind::Exists, text))
     }
 
     /// Returns the start and end byte range of the leftmost-first match in
@@ -300,7 +281,7 @@ impl Regex {
     /// # }
     /// ```
     pub fn find(&self, text: &str) -> Option<(usize, usize)> {
-        let caps = exec(self, Location, text);
+        let caps = exec(self, MatchKind::Location, text);
         if has_match(&caps) {
             Some((caps[0].unwrap(), caps[1].unwrap()))
         } else {
@@ -392,7 +373,7 @@ impl Regex {
     /// The `0`th capture group is always unnamed, so it must always be
     /// accessed with `at(0)`.
     pub fn captures<'t>(&self, text: &'t str) -> Option<Captures<'t>> {
-        let caps = exec(self, Submatches, text);
+        let caps = exec(self, MatchKind::Submatches, text);
         Captures::new(self, text, caps)
     }
 
@@ -598,23 +579,23 @@ impl Regex {
     /// Returns the original string of this regex.
     pub fn as_str<'a>(&'a self) -> &'a str {
         match *self {
-            Dynamic(ExDynamic { ref original, .. }) => original,
-            Native(ExNative { ref original, .. }) => original,
+            Regex::Dynamic(Program { ref original, .. }) => original,
+            Regex::Native(ExNative { ref original, .. }) => original,
         }
     }
 
     #[doc(hidden)]
     pub fn names_iter<'a>(&'a self) -> NamesIter<'a> {
         match *self {
-            Native(ref n) => NamesIterNative(n.names.iter()),
-            Dynamic(ref d) => NamesIterDynamic(d.names.iter())
+            Regex::Native(ref n) => NamesIterNative(n.names.iter()),
+            Regex::Dynamic(ref d) => NamesIterDynamic(d.cap_names.iter())
         }
     }
 
     fn names_len(&self) -> usize {
         match *self {
-            Native(ref n) => n.names.len(),
-            Dynamic(ref d) => d.names.len()
+            Regex::Native(ref n) => n.names.len(),
+            Regex::Dynamic(ref d) => d.cap_names.len()
         }
     }
 
@@ -630,8 +611,10 @@ impl<'a> Iterator for NamesIter<'a> {
 
     fn next(&mut self) -> Option<Option<String>> {
         match *self {
-            NamesIterNative(ref mut i) => i.next().map(|x| x.map(|s| s.to_string())),
-            NamesIterDynamic(ref mut i) => i.next().map(|x| x.as_ref().map(|s| s.to_string())),
+            NamesIterNative(ref mut i) =>
+                i.next().map(|x| x.map(|s| s.to_owned())),
+            NamesIterDynamic(ref mut i) =>
+                i.next().map(|x| x.as_ref().map(|s| s.to_owned())),
         }
     }
 }
@@ -974,8 +957,8 @@ impl<'r, 't> Iterator for FindCaptures<'r, 't> {
             return None
         }
 
-        let caps = exec_slice(self.re, Submatches, self.search,
-                              self.last_end, self.search.len());
+        let caps = exec_slice(self.re, MatchKind::Submatches, self.search,
+                              self.last_end);
         let (s, e) =
             if !has_match(&caps) {
                 return None
@@ -1022,8 +1005,8 @@ impl<'r, 't> Iterator for FindMatches<'r, 't> {
             return None
         }
 
-        let caps = exec_slice(self.re, Location, self.search,
-                              self.last_end, self.search.len());
+        let caps = exec_slice(self.re, MatchKind::Location,
+                              self.search, self.last_end);
         let (s, e) =
             if !has_match(&caps) {
                 return None
@@ -1107,14 +1090,14 @@ unsafe impl<'r, 't> Searcher<'t> for RegexSearcher<'r, 't> {
 }
 
 fn exec(re: &Regex, which: MatchKind, input: &str) -> CaptureLocs {
-    exec_slice(re, which, input, 0, input.len())
+    exec_slice(re, which, input, 0)
 }
 
 fn exec_slice(re: &Regex, which: MatchKind,
-              input: &str, s: usize, e: usize) -> CaptureLocs {
+              text: &str, s: usize) -> CaptureLocs {
     match *re {
-        Dynamic(ExDynamic { ref prog, .. }) => vm::run(which, prog, input, s, e),
-        Native(ExNative { ref prog, .. }) => (*prog)(which, input, s, e),
+        Regex::Dynamic(ref prog) => Nfa::run(which, prog, text, s),
+        Regex::Native(ExNative { ref prog, .. }) => (*prog)(which, text, s),
     }
 }
 

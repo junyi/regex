@@ -60,6 +60,13 @@ fn match_class_in_range(b: &mut Bencher) {
 }
 
 #[bench]
+fn match_class_unicode(b: &mut Bencher) {
+    let re = regex!(r"\pL");
+    let text = format!("{}a", repeat("☃5☃5").take(20).collect::<String>());
+    bench_assert_match(b, re, &text);
+}
+
+#[bench]
 fn replace_all(b: &mut Bencher) {
     let re = regex!("[cjrw]");
     let text = "abcdefghijklmnopqrstuvwxyz";
@@ -145,7 +152,8 @@ macro_rules! throughput(
         fn $name(b: &mut Bencher) {
             let text = gen_text($size);
             b.bytes = $size;
-            b.iter(|| if $regex.is_match(&text) { panic!("match") });
+            let re = $regex;
+            b.iter(|| if re.is_match(&text) { panic!("match") });
         }
     );
 );

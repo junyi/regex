@@ -33,20 +33,15 @@
 //
 // [1] - http://swtch.com/~rsc/regex/regex3.html
 
-use self::MatchKind::*;
-use self::StepState::*;
-
-use std::cmp;
 use std::mem;
 
-use compile::Program;
-use compile::Inst::*;
-use syntax;
+use program::Program;
+use input::{Input, CharInput};
 
 pub type CaptureLocs = Vec<Option<usize>>;
 
 /// Indicates the type of match to be performed by the VM.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum MatchKind {
     /// Only checks if a match exists or not. Does not return location.
     Exists,
@@ -57,80 +52,60 @@ pub enum MatchKind {
     Submatches,
 }
 
-/// Runs an NFA simulation on the compiled expression given on the search text
-/// `input`. The search begins at byte index `start` and ends at byte index
-/// `end`. (The range is specified here so that zero-width assertions will work
-/// correctly when searching for successive non-overlapping matches.)
-///
-/// The `which` parameter indicates what kind of capture information the caller
-/// wants. There are three choices: match existence only, the location of the
-/// entire match or the locations of the entire match in addition to the
-/// locations of each submatch.
-pub fn run<'r, 't>(which: MatchKind, prog: &'r Program, input: &'t str,
-                   start: usize, end: usize) -> CaptureLocs {
-    Nfa {
-        which: which,
-        prog: prog,
-        input: input,
-        start: start,
-        end: end,
-        ic: 0,
-        chars: CharReader::new(input),
-    }.run()
-}
-
-struct Nfa<'r, 't> {
-    which: MatchKind,
+#[derive(Debug)]
+pub struct Nfa<'r, 't> {
     prog: &'r Program,
-    input: &'t str,
-    start: usize,
-    end: usize,
-    ic: usize,
-    chars: CharReader<'t>,
+    input: CharInput<'t>,
 }
 
 /// Indicates the next action to take after a single non-empty instruction
 /// is processed.
-#[derive(Copy, Clone)]
-pub enum StepState {
+#[derive(Copy, Clone, Debug)]
+pub enum Step {
     /// This is returned if and only if a Match instruction is reached and
     /// we only care about the existence of a match. It instructs the VM to
     /// quit early.
-    StepMatchEarlyReturn,
+    MatchEarlyReturn,
     /// Indicates that a match was found. Thus, the rest of the states in the
     /// *current* queue should be dropped (i.e., leftmost-first semantics).
     /// States in the "next" queue can still be processed.
-    StepMatch,
+    Match,
     /// No match was found. Continue with the next state in the queue.
-    StepContinue,
+    Continue,
 }
 
 impl<'r, 't> Nfa<'r, 't> {
-    fn run(&mut self) -> CaptureLocs {
-        let ncaps = match self.which {
-            Exists => 0,
-            Location => 1,
-            Submatches => self.prog.num_captures(),
+    /// Runs an NFA simulation on the compiled expression given on the search
+    /// text `input`. The search begins at byte index `start` and ends at byte
+    /// index `end`. (The range is specified here so that zero-width assertions
+    /// will work correctly when searching for successive non-overlapping
+    /// matches.)
+    ///
+    /// The `which` parameter indicates what kind of capture information the
+    /// caller wants. There are three choices: match existence only, the
+    /// location of the entire match or the locations of the entire match in
+    /// addition to the locations of each submatch.
+    pub fn run(which: MatchKind, prog: &'r Program, text: &'t str,
+               start: usize) -> CaptureLocs {
+        let mut caps = match which {
+            MatchKind::Exists => vec![],
+            MatchKind::Location => vec![None, None],
+            MatchKind::Submatches => vec![None; prog.num_captures() * 2],
         };
+        let mut q = prog.nfa_threads.get();
+        Nfa {
+            prog: prog,
+            input: CharInput::new(text, start),
+        }.exec(&mut q, &mut caps);
+        prog.nfa_threads.put(q);
+        caps
+    }
+
+    fn exec(&mut self, mut q: &mut NfaThreads, mut caps: &mut CaptureLocs) {
         let mut matched = false;
-        let ninsts = self.prog.insts.len();
-        let mut clist = Threads::new(self.which, ninsts, ncaps);
-        let mut nlist = Threads::new(self.which, ninsts, ncaps);
-        let mut groups = vec![None; ncaps * 2];
-
-        // Determine if the expression starts with a '^' so we can avoid
-        // simulating .*?
-        // Make sure multi-line mode isn't enabled for it, otherwise we can't
-        // drop the initial .*?
-        let prefix_anchor = match self.prog.insts[1] {
-            StartText => true,
-            _ => false,
-        };
-
-        self.ic = self.start;
-        let mut next_ic = self.chars.set(self.start);
-        while self.ic <= self.end {
-            if clist.size == 0 {
+        q.clist.empty(); q.nlist.empty();
+'LOOP:  loop {
+            if q.clist.size == 0 {
                 // We have a match and we're done exploring alternatives.
                 // Time to quit.
                 if matched {
@@ -139,7 +114,7 @@ impl<'r, 't> Nfa<'r, 't> {
 
                 // If the expression starts with a '^' we can terminate as soon
                 // as the last thread dies.
-                if self.ic != 0 && prefix_anchor {
+                if !self.input.beginning() && self.prog.anchored_begin {
                     break;
                 }
 
@@ -148,346 +123,162 @@ impl<'r, 't> Nfa<'r, 't> {
                 // BUT, if there's a literal prefix for the program, try to
                 // jump ahead quickly. If it can't be found, then we can bail
                 // out early.
-                if self.prog.prefix.len() > 0 {
-                    let needle = self.prog.prefix.as_bytes();
-                    let haystack = &self.input.as_bytes()[self.ic..];
-                    match find_prefix(needle, haystack) {
-                        None => break,
-                        Some(i) => {
-                            self.ic += i;
-                            next_ic = self.chars.set(self.ic);
-                        }
-                    }
+                if self.prog.prefix.len() > 0
+                        && !self.input.advance_prefix(&self.prog.prefix) {
+                    // Has a prefix but we couldn't find one, so we're done.
+                    break;
                 }
             }
 
             // This simulates a preceding '.*?' for every regex by adding
             // a state starting at the current position in the input for the
             // beginning of the program only if we don't already have a match.
-            if clist.size == 0 || (!prefix_anchor && !matched) {
-                self.add(&mut clist, 0, &mut groups)
+            if q.clist.size == 0 || (!self.prog.anchored_begin && !matched) {
+                self.add(&mut q.clist, 0, &mut caps)
             }
-
-            // Now we try to read the next character.
-            // As a result, the 'step' method will look at the previous
-            // character.
-            self.ic = next_ic;
-            next_ic = self.chars.advance();
-
-            for i in 0..clist.size {
-                let pc = clist.pc(i);
-                let step_state = self.step(&mut groups, &mut nlist,
-                                           clist.groups(i), pc);
+            // The previous call to "add" actually inspects the position just
+            // before the current character. For stepping through the machine,
+            // we can to look at the current character, so we advance the
+            // input.
+            self.input.advance();
+            for i in 0..q.clist.size {
+                let pc = q.clist.pc(i);
+                let step_state = self.step(caps, &mut q.nlist,
+                                           q.clist.groups(i), pc);
                 match step_state {
-                    StepMatchEarlyReturn => return vec![Some(0), Some(0)],
-                    StepMatch => { matched = true; break },
-                    StepContinue => {},
+                    Step::MatchEarlyReturn => { matched = true; break 'LOOP }
+                    Step::Match => { matched = true; break }
+                    Step::Continue => {}
                 }
             }
-            mem::swap(&mut clist, &mut nlist);
-            nlist.empty();
+            if self.input.cur().is_none() {
+                break;
+            }
+            mem::swap(&mut q.clist, &mut q.nlist);
+            q.nlist.empty();
         }
-        match self.which {
-            Exists if matched     => vec![Some(0), Some(0)],
-            Exists                => vec![None, None],
-            Location | Submatches => groups,
+        if matched && caps.len() == 0 {
+            caps.push(Some(0));
+            caps.push(Some(0));
         }
     }
 
-    fn step(&self, groups: &mut [Option<usize>], nlist: &mut Threads,
-            caps: &mut [Option<usize>], pc: usize)
-           -> StepState {
+    fn step(&self, caps: &mut [Option<usize>], nlist: &mut Threads,
+            thread_caps: &mut [Option<usize>], pc: usize)
+           -> Step {
+        use program::Inst::*;
+
         match self.prog.insts[pc] {
             Match => {
-                match self.which {
-                    Exists => {
-                        return StepMatchEarlyReturn
+                if caps.len() == 0 {
+                    return Step::MatchEarlyReturn;
+                } else {
+                    for (slot, val) in caps.iter_mut().zip(thread_caps.iter()) {
+                        *slot = *val;
                     }
-                    Location => {
-                        groups[0] = caps[0];
-                        groups[1] = caps[1];
-                        return StepMatch
-                    }
-                    Submatches => {
-                        for (slot, val) in groups.iter_mut().zip(caps.iter()) {
-                            *slot = *val;
-                        }
-                        return StepMatch
-                    }
+                    return Step::Match;
                 }
             }
-            OneChar { c, casei } => {
-                if self.char_eq(casei, self.chars.prev, c) {
-                    self.add(nlist, pc+1, caps);
+            Char(ref inst) => {
+                if inst.matches(self.input.cur()) {
+                    self.add(nlist, pc+1, thread_caps);
                 }
             }
-            CharClass(ref cls) => {
-                if self.chars.prev.map(|c| cls.matches(c)).unwrap_or(false) {
-                    self.add(nlist, pc+1, caps);
+            Ranges(ref inst) => {
+                if inst.matches(self.input.cur()).is_some() {
+                    self.add(nlist, pc+1, thread_caps);
                 }
             }
-            Any => self.add(nlist, pc+1, caps),
-            AnyNoNL => {
-                if !self.char_eq(false, self.chars.prev, '\n') {
-                    self.add(nlist, pc+1, caps)
-                }
-            }
-            StartLine | EndLine | StartText | EndText
-            | WordBoundary | NotWordBoundary
-            | Save(_) | Jump(_) | Split(_, _) => {},
+            EmptyLook(_) | Save(_) | Jump(_) | Split(_, _) => {},
         }
-        StepContinue
+        Step::Continue
     }
 
-    fn add(&self, nlist: &mut Threads, pc: usize, groups: &mut [Option<usize>]) {
+    fn add(&self, nlist: &mut Threads, pc: usize, thread_caps: &mut [Option<usize>]) {
+        use program::Inst::*;
+
         if nlist.contains(pc) {
             return
         }
-        // We have to add states to the threads list even if their empty.
-        // TL;DR - It prevents cycles.
-        // If we didn't care about cycles, we'd *only* add threads that
-        // correspond to non-jumping instructions (OneChar, Any, Match, etc.).
-        // But, it's possible for valid regexs (like '(a*)*') to result in
-        // a cycle in the instruction list. e.g., We'll keep chasing the Split
-        // instructions forever.
-        // So we add these instructions to our thread queue, but in the main
-        // VM loop, we look for them but simply ignore them.
-        // Adding them to the queue prevents them from being revisited so we
-        // can avoid cycles (and the inevitable stack overflow).
-        //
-        // We make a minor optimization by indicating that the state is "empty"
-        // so that its capture groups are not filled in.
+        let ti = nlist.add(pc);
         match self.prog.insts[pc] {
-            StartLine => {
-                nlist.add(pc, groups, true);
-                if self.chars.is_begin() || self.char_is(self.chars.prev, '\n') {
-                    self.add(nlist, pc + 1, groups);
-                }
-            }
-            StartText => {
-                nlist.add(pc, groups, true);
-                if self.chars.is_begin() {
-                    self.add(nlist, pc + 1, groups);
-                }
-            }
-            EndLine => {
-                nlist.add(pc, groups, true);
-                if self.chars.is_end() || self.char_is(self.chars.cur, '\n') {
-                    self.add(nlist, pc + 1, groups)
-                }
-            }
-            EndText => {
-                nlist.add(pc, groups, true);
-                if self.chars.is_end() {
-                    self.add(nlist, pc + 1, groups)
-                }
-            }
-            WordBoundary => {
-                nlist.add(pc, groups, true);
-                if self.chars.is_word_boundary() {
-                    self.add(nlist, pc + 1, groups);
-                }
-            }
-            NotWordBoundary => {
-                nlist.add(pc, groups, true);
-                if !self.chars.is_word_boundary() {
-                    self.add(nlist, pc + 1, groups);
+            EmptyLook(ref inst) => {
+                if inst.matches(self.input.cur(), self.input.next()) {
+                    self.add(nlist, pc + 1, thread_caps);
                 }
             }
             Save(slot) => {
-                nlist.add(pc, groups, true);
-                match self.which {
-                    Location if slot <= 1 => {
-                        let old = groups[slot];
-                        groups[slot] = Some(self.ic);
-                        self.add(nlist, pc + 1, groups);
-                        groups[slot] = old;
-                    }
-                    Submatches => {
-                        let old = groups[slot];
-                        groups[slot] = Some(self.ic);
-                        self.add(nlist, pc + 1, groups);
-                        groups[slot] = old;
-                    }
-                    Exists | Location => self.add(nlist, pc + 1, groups),
+                if slot >= thread_caps.len() {
+                    self.add(nlist, pc + 1, thread_caps);
+                } else {
+                    let old = thread_caps[slot];
+                    thread_caps[slot] = Some(self.input.next_byte_offset());
+                    self.add(nlist, pc + 1, thread_caps);
+                    thread_caps[slot] = old;
                 }
             }
             Jump(to) => {
-                nlist.add(pc, groups, true);
-                self.add(nlist, to, groups)
+                self.add(nlist, to, thread_caps)
             }
             Split(x, y) => {
-                nlist.add(pc, groups, true);
-                self.add(nlist, x, groups);
-                self.add(nlist, y, groups);
+                self.add(nlist, x, thread_caps);
+                self.add(nlist, y, thread_caps);
             }
-            Match | OneChar{..} | CharClass(_) | Any | AnyNoNL => {
-                nlist.add(pc, groups, false);
-            }
-        }
-    }
-
-    // Use Unicode simple case folding for case insensitive comparisons,
-    // as we’re matching individual code points.
-    #[inline]
-    fn char_eq(&self, casei: bool, textc: Option<char>, regc: char) -> bool {
-        match textc {
-            None => false,
-            Some(textc) => {
-                regc == textc || (casei && syntax::simple_case_fold(regc) == syntax::simple_case_fold(textc))
+            Match | Char(_) | Ranges(_) => {
+                let mut t = &mut nlist.queue[ti];
+                for (slot, val) in t.caps.iter_mut().zip(thread_caps.iter()) {
+                    *slot = *val;
+                }
             }
         }
     }
-
-    #[inline]
-    fn char_is(&self, textc: Option<char>, regc: char) -> bool {
-        textc == Some(regc)
-    }
 }
 
-/// CharReader is responsible for maintaining a "previous" and a "current"
-/// character. This one-character lookahead is necessary for assertions that
-/// look one character before or after the current position.
-pub struct CharReader<'t> {
-    /// The previous character read. It is None only when processing the first
-    /// character of the input.
-    pub prev: Option<char>,
-    /// The current character.
-    pub cur: Option<char>,
-    input: &'t str,
-    next: usize,
+#[derive(Debug)]
+pub struct NfaThreads {
+    clist: Threads,
+    nlist: Threads,
 }
 
-impl<'t> CharReader<'t> {
-    /// Returns a new CharReader that advances through the input given.
-    /// Note that a CharReader has no knowledge of the range in which to search
-    /// the input.
-    pub fn new(input: &'t str) -> CharReader<'t> {
-        CharReader {
-            prev: None,
-            cur: None,
-            input: input,
-            next: 0,
-       }
-    }
-
-    /// Sets the previous and current character given any arbitrary byte
-    /// index (at a Unicode codepoint boundary).
-    #[inline]
-    pub fn set(&mut self, ic: usize) -> usize {
-        self.prev = None;
-        self.cur = None;
-        self.next = 0;
-
-        if self.input.len() == 0 {
-            return 1
-        }
-        if ic > 0 {
-            let i = cmp::min(ic, self.input.len());
-            self.prev = self.input[..i].chars().rev().next();
-        }
-        if ic < self.input.len() {
-            let cur = self.input[ic..].chars().next().unwrap();
-            self.cur = Some(cur);
-            self.next = ic + cur.len_utf8();
-            self.next
-        } else {
-            self.input.len() + 1
-        }
-    }
-
-    /// Does the same as `set`, except it always advances to the next
-    /// character in the input (and therefore does half as many UTF8 decodings).
-    #[inline]
-    pub fn advance(&mut self) -> usize {
-        self.prev = self.cur;
-        if self.next < self.input.len() {
-            let cur = self.input[self.next..].chars().next().unwrap();
-            self.cur = Some(cur);
-            self.next += cur.len_utf8();
-        } else {
-            self.cur = None;
-            self.next = self.input.len() + 1;
-        }
-        self.next
-    }
-
-    /// Returns true if and only if this is the beginning of the input
-    /// (ignoring the range of the input to search).
-    #[inline]
-    pub fn is_begin(&self) -> bool { self.prev.is_none() }
-
-    /// Returns true if and only if this is the end of the input
-    /// (ignoring the range of the input to search).
-    #[inline]
-    pub fn is_end(&self) -> bool { self.cur.is_none() }
-
-    /// Returns true if and only if the current position is a word boundary.
-    /// (Ignoring the range of the input to search.)
-    pub fn is_word_boundary(&self) -> bool {
-        fn is_word(c: Option<char>) -> bool {
-            c.map(syntax::is_word_char).unwrap_or(false)
-        }
-
-        if self.is_begin() {
-            return is_word(self.cur);
-        }
-        if self.is_end() {
-            return is_word(self.prev);
-        }
-        (is_word(self.cur) && !is_word(self.prev))
-        || (is_word(self.prev) && !is_word(self.cur))
-    }
-}
-
-#[derive(Clone)]
-struct Thread {
-    pc: usize,
-    groups: Vec<Option<usize>>,
-}
-
+#[derive(Debug)]
 struct Threads {
-    which: MatchKind,
     queue: Vec<Thread>,
     sparse: Vec<usize>,
     size: usize,
 }
 
+#[derive(Clone, Debug)]
+struct Thread {
+    pc: usize,
+    caps: Vec<Option<usize>>,
+}
+
+impl NfaThreads {
+    pub fn new(num_insts: usize, ncaps: usize) -> NfaThreads {
+        NfaThreads {
+            clist: Threads::new(num_insts, ncaps),
+            nlist: Threads::new(num_insts, ncaps),
+        }
+    }
+}
+
 impl Threads {
-    // This is using a wicked neat trick to provide constant time lookup
-    // for threads in the queue using a sparse set. A queue of threads is
-    // allocated once with maximal size when the VM initializes and is reused
-    // throughout execution. That is, there should be zero allocation during
-    // the execution of a VM.
-    //
-    // See http://research.swtch.com/sparse for the deets.
-    fn new(which: MatchKind, num_insts: usize, ncaps: usize) -> Threads {
-        let t = Thread { pc: 0, groups: vec![None; ncaps * 2] };
+    fn new(num_insts: usize, ncaps: usize) -> Threads {
+        let t = Thread { pc: 0, caps: vec![None; ncaps * 2] };
         Threads {
-            which: which,
             queue: vec![t; num_insts],
             sparse: vec![0; num_insts],
             size: 0,
         }
     }
 
-    fn add(&mut self, pc: usize, groups: &[Option<usize>], empty: bool) {
-        let t = &mut self.queue[self.size];
-        t.pc = pc;
-        match (empty, self.which) {
-            (_, Exists) | (true, _) => {},
-            (false, Location) => {
-                t.groups[0] = groups[0];
-                t.groups[1] = groups[1];
-            }
-            (false, Submatches) => {
-                for (slot, val) in t.groups.iter_mut().zip(groups.iter()) {
-                    *slot = *val;
-                }
-            }
-        }
-        self.sparse[pc] = self.size;
+    #[inline]
+    fn add(&mut self, pc: usize) -> usize {
+        let i = self.size;
+        self.queue[i].pc = pc;
+        self.sparse[pc] = i;
         self.size += 1;
+        i
     }
 
     #[inline]
@@ -508,24 +299,6 @@ impl Threads {
 
     #[inline]
     fn groups(&mut self, i: usize) -> &mut [Option<usize>] {
-        &mut self.queue[i].groups
+        &mut self.queue[i].caps
     }
-}
-
-/// Returns the starting location of `needle` in `haystack`.
-/// If `needle` is not in `haystack`, then `None` is returned.
-///
-/// Note that this is using a naive substring algorithm.
-#[inline]
-pub fn find_prefix(needle: &[u8], haystack: &[u8]) -> Option<usize> {
-    let (hlen, nlen) = (haystack.len(), needle.len());
-    if nlen > hlen || nlen == 0 {
-        return None
-    }
-    for (offset, window) in haystack.windows(nlen).enumerate() {
-        if window == needle {
-            return Some(offset)
-        }
-    }
-    None
 }

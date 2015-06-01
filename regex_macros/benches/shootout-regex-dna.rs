@@ -38,15 +38,14 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
 // OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#![feature(plugin, scoped)]
-#![plugin(regex_macros)]
-
 extern crate regex;
 
 use std::io::{self, Read};
 use std::sync::Arc;
 use std::thread;
 use regex::NoExpand;
+
+macro_rules! regex { ($re:expr) => { ::regex::Regex::new($re).unwrap() } }
 
 #[test]
 fn check() {
@@ -71,7 +70,7 @@ agggtaa[cgt]|[acg]ttaccct 5
 
 #[allow(dead_code)]
 fn main() {
-    let mut input = String::new();
+    let mut input = String::with_capacity(10 * 1024 * 1024);
     io::stdin().read_to_string(&mut input).unwrap();
     println!("{}", run(input).connect("\n"));
 }
@@ -79,30 +78,13 @@ fn main() {
 fn run(mut seq: String) -> Vec<String> {
     let ilen = seq.len();
 
+    // println!("Fixing initial string...");
+    // println!("{}", regex!(r">[^\n]*\n|\n").captures_iter(&seq).count());
     seq = regex!(">[^\n]*\n|\n").replace_all(&seq, NoExpand(""));
+    // seq = seq.replace("\n", "");
+    // println!("done.");
     let seq_arc = Arc::new(seq.clone()); // copy before it moves
     let clen = seq.len();
-
-    let seqlen = thread::scoped(move|| {
-        let substs = vec![
-            (regex!("B"), "(c|g|t)"),
-            (regex!("D"), "(a|g|t)"),
-            (regex!("H"), "(a|c|t)"),
-            (regex!("K"), "(g|t)"),
-            (regex!("M"), "(a|c)"),
-            (regex!("N"), "(a|c|g|t)"),
-            (regex!("R"), "(a|g)"),
-            (regex!("S"), "(c|g)"),
-            (regex!("V"), "(a|c|g)"),
-            (regex!("W"), "(a|t)"),
-            (regex!("Y"), "(c|t)"),
-        ];
-        let mut seq = seq;
-        for (re, replacement) in substs.into_iter() {
-            seq = re.replace_all(&seq, NoExpand(replacement));
-        }
-        seq.len()
-    });
 
     let variants = vec![
         regex!("agggtaaa|tttaccct"),
@@ -119,18 +101,44 @@ fn run(mut seq: String) -> Vec<String> {
     for variant in variants.into_iter() {
         let seq_arc_copy = seq_arc.clone();
         variant_strs.push(variant.to_string());
-        counts.push(thread::scoped(move|| {
+        counts.push(thread::spawn(move || {
             variant.find_iter(&seq_arc_copy).count()
         }));
     }
 
+    let seqlen = {
+        let substs = vec![
+            (regex!("B"), "(c|g|t)"),
+            (regex!("D"), "(a|g|t)"),
+            (regex!("H"), "(a|c|t)"),
+            (regex!("K"), "(g|t)"),
+            (regex!("M"), "(a|c)"),
+            (regex!("N"), "(a|c|g|t)"),
+            (regex!("R"), "(a|g)"),
+            (regex!("S"), "(c|g)"),
+            (regex!("V"), "(a|c|g)"),
+            (regex!("W"), "(a|t)"),
+            (regex!("Y"), "(c|t)"),
+        ];
+        println!("Starting replacements...");
+        let mut seq = seq;
+        for (re, replacement) in substs.into_iter() {
+            println!("replacement {}", re);
+            // println!("count: {}", re.captures_iter(&seq).count());
+            seq = re.replace_all(&seq, NoExpand(replacement));
+        }
+        println!("done replacements!");
+        seq.len()
+    };
+
     let mut olines = Vec::new();
     for (variant, count) in variant_strs.iter().zip(counts.into_iter()) {
-        olines.push(format!("{} {}", variant, count.join()));
+        olines.push(format!("{} {}", variant, count.join().unwrap()));
     }
     olines.push("".to_string());
     olines.push(format!("{}", ilen));
     olines.push(format!("{}", clen));
-    olines.push(format!("{}", seqlen.join()));
+    // olines.push(format!("{}", seqlen.join().unwrap()));
+    olines.push(format!("{}", seqlen));
     olines
 }

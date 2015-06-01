@@ -387,8 +387,8 @@
 //! some other regular expression engines. (We pay for this by disallowing
 //! features like arbitrary look-ahead and back-references.)
 
-#![deny(missing_docs)]
-#![cfg_attr(test, deny(warnings))]
+// #![deny(missing_docs)]
+// #![cfg_attr(test, deny(warnings))]
 #![cfg_attr(feature = "pattern", feature(core))]
 #![doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "http://www.rust-lang.org/favicon.ico",
@@ -403,7 +403,11 @@ pub use re::{
     quote, is_match,
 };
 
+mod char;
 mod compile;
+mod input;
+mod pool;
+mod program;
 mod re;
 mod vm;
 
@@ -425,14 +429,9 @@ pub mod native {
     //
     // On the bright side, `rustdoc` lets us hide this from the public API
     // documentation.
-    pub use compile::Program;
-    pub use compile::Inst;
+    pub use program::{Inst, Program};
     pub use syntax::simple_case_fold;
-    pub use re::{ExDynamic, ExNative};
+    pub use re::ExNative;
     pub use re::Regex::{Dynamic, Native};
-    pub use vm::{CharReader, find_prefix};
     pub use vm::MatchKind::{self, Exists, Location, Submatches};
-    pub use vm::StepState::{
-        self, StepMatchEarlyReturn, StepMatch, StepContinue,
-    };
 }

@@ -36,8 +36,7 @@ use rustc::plugin::Registry;
 
 use regex::Regex;
 use regex::native::{
-    Inst, Program, Dynamic, ExDynamic, Native,
-    simple_case_fold,
+    Inst, Program, Dynamic, Native, simple_case_fold,
 };
 
 /// For the `regex!` syntax extension. Do not use.
@@ -86,7 +85,7 @@ fn native(cx: &mut ExtCtxt, sp: codemap::Span, tts: &[ast::TokenTree])
         }
     };
     let prog = match re {
-        Dynamic(ExDynamic { ref prog, .. }) => prog.clone(),
+        Dynamic(ref prog) => prog.clone(),
         Native(_) => unreachable!(),
     };
 

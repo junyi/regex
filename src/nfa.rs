@@ -38,19 +38,7 @@ use std::mem;
 use program::Program;
 use input::{Input, CharInput};
 
-pub type CaptureLocs = Vec<Option<usize>>;
-
-/// Indicates the type of match to be performed by the VM.
-#[derive(Copy, Clone, Debug)]
-pub enum MatchKind {
-    /// Only checks if a match exists or not. Does not return location.
-    Exists,
-    /// Returns the start and end indices of the entire match in the input
-    /// given.
-    Location,
-    /// Returns the start and end indices of each submatch in the input given.
-    Submatches,
-}
+pub type CaptureIdxs = [Option<usize>];
 
 #[derive(Debug)]
 pub struct Nfa<'r, 't> {
@@ -85,23 +73,18 @@ impl<'r, 't> Nfa<'r, 't> {
     /// caller wants. There are three choices: match existence only, the
     /// location of the entire match or the locations of the entire match in
     /// addition to the locations of each submatch.
-    pub fn run(which: MatchKind, prog: &'r Program, text: &'t str,
-               start: usize) -> CaptureLocs {
-        let mut caps = match which {
-            MatchKind::Exists => vec![],
-            MatchKind::Location => vec![None, None],
-            MatchKind::Submatches => vec![None; prog.num_captures() * 2],
-        };
+    pub fn run(prog: &'r Program, mut caps: &mut CaptureIdxs, text: &'t str,
+               start: usize) -> bool {
         let mut q = prog.nfa_threads.get();
-        Nfa {
+        let matched = Nfa {
             prog: prog,
             input: CharInput::new(text, start),
         }.exec(&mut q, &mut caps);
         prog.nfa_threads.put(q);
-        caps
+        matched
     }
 
-    fn exec(&mut self, mut q: &mut NfaThreads, mut caps: &mut CaptureLocs) {
+    fn exec(&mut self, mut q: &mut NfaThreads, mut caps: &mut CaptureIdxs) -> bool {
         let mut matched = false;
         q.clist.empty(); q.nlist.empty();
 'LOOP:  loop {
@@ -157,10 +140,7 @@ impl<'r, 't> Nfa<'r, 't> {
             mem::swap(&mut q.clist, &mut q.nlist);
             q.nlist.empty();
         }
-        if matched && caps.len() == 0 {
-            caps.push(Some(0));
-            caps.push(Some(0));
-        }
+        matched
     }
 
     fn step(&self, caps: &mut [Option<usize>], nlist: &mut Threads,

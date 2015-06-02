@@ -16,7 +16,7 @@ use std::fmt;
 use std::str::pattern::{Pattern, Searcher, SearchStep};
 use std::str::FromStr;
 
-use nfa::{CaptureLocs, MatchKind, Nfa};
+use nfa::{CaptureIdxs, Nfa};
 use program::Program;
 use syntax;
 
@@ -175,7 +175,7 @@ pub struct ExNative {
     #[doc(hidden)]
     pub names: &'static &'static [Option<&'static str>],
     #[doc(hidden)]
-    pub prog: fn(MatchKind, &str, usize) -> Vec<Option<usize>>
+    pub prog: fn(&mut CaptureIdxs, &str, usize) -> bool,
 }
 
 impl Copy for ExNative {}
@@ -257,7 +257,7 @@ impl Regex {
     /// # }
     /// ```
     pub fn is_match(&self, text: &str) -> bool {
-        has_match(&exec(self, MatchKind::Exists, text))
+        exec(self, &mut [], text, 0)
     }
 
     /// Returns the start and end byte range of the leftmost-first match in
@@ -281,8 +281,8 @@ impl Regex {
     /// # }
     /// ```
     pub fn find(&self, text: &str) -> Option<(usize, usize)> {
-        let caps = exec(self, MatchKind::Location, text);
-        if has_match(&caps) {
+        let mut caps = [None, None];
+        if exec(self, &mut caps, text, 0) {
             Some((caps[0].unwrap(), caps[1].unwrap()))
         } else {
             None
@@ -373,8 +373,12 @@ impl Regex {
     /// The `0`th capture group is always unnamed, so it must always be
     /// accessed with `at(0)`.
     pub fn captures<'t>(&self, text: &'t str) -> Option<Captures<'t>> {
-        let caps = exec(self, MatchKind::Submatches, text);
-        Captures::new(self, text, caps)
+        let mut caps = self.alloc_captures();
+        if exec(self, &mut caps, text, 0) {
+            Some(Captures::new(self, text, caps))
+        } else {
+            None
+        }
     }
 
     /// Returns an iterator over all the non-overlapping capture groups matched
@@ -599,6 +603,12 @@ impl Regex {
         }
     }
 
+    fn alloc_captures(&self) -> Vec<Option<usize>> {
+        match *self {
+            Regex::Native(ref n) => vec![None; 2 * n.names.len()],
+            Regex::Dynamic(ref d) => d.alloc_captures(),
+        }
+    }
 }
 
 pub enum NamesIter<'a> {
@@ -733,37 +743,29 @@ impl<'r, 't> Iterator for RegexSplitsN<'r, 't> {
 /// `'t` is the lifetime of the matched text.
 pub struct Captures<'t> {
     text: &'t str,
-    locs: CaptureLocs,
+    locs: Vec<Option<usize>>,
     named: Option<HashMap<String, usize>>,
 }
 
 impl<'t> Captures<'t> {
-    fn new(re: &Regex, search: &'t str, locs: CaptureLocs)
-          -> Option<Captures<'t>> {
-        if !has_match(&locs) {
-            return None
-        }
-
+    fn new(re: &Regex, search: &'t str, locs: Vec<Option<usize>>) -> Captures<'t> {
         let named =
             if re.names_len() == 0 {
                 None
             } else {
                 let mut named = HashMap::new();
                 for (i, name) in re.names_iter().enumerate() {
-                    match name {
-                        None => {},
-                        Some(name) => {
-                            named.insert(name, i);
-                        }
+                    if let Some(name) = name {
+                        named.insert(name, i);
                     }
                 }
                 Some(named)
             };
-        Some(Captures {
+        Captures {
             text: search,
             locs: locs,
             named: named,
-        })
+        }
     }
 
     /// Returns the start and end positions of the Nth capture group.
@@ -957,14 +959,11 @@ impl<'r, 't> Iterator for FindCaptures<'r, 't> {
             return None
         }
 
-        let caps = exec_slice(self.re, MatchKind::Submatches, self.search,
-                              self.last_end);
-        let (s, e) =
-            if !has_match(&caps) {
-                return None
-            } else {
-                (caps[0].unwrap(), caps[1].unwrap())
-            };
+        let mut caps = self.re.alloc_captures();
+        if !exec(self.re, &mut caps, self.search, self.last_end) {
+            return None
+        }
+        let (s, e) = (caps[0].unwrap(), caps[1].unwrap());
 
         // Don't accept empty matches immediately following a match.
         // i.e., no infinite loops please.
@@ -978,7 +977,7 @@ impl<'r, 't> Iterator for FindCaptures<'r, 't> {
         }
         self.last_end = e;
         self.last_match = Some(self.last_end);
-        Captures::new(self.re, self.search, caps)
+        Some(Captures::new(self.re, self.search, caps))
     }
 }
 
@@ -1005,14 +1004,11 @@ impl<'r, 't> Iterator for FindMatches<'r, 't> {
             return None
         }
 
-        let caps = exec_slice(self.re, MatchKind::Location,
-                              self.search, self.last_end);
-        let (s, e) =
-            if !has_match(&caps) {
-                return None
-            } else {
-                (caps[0].unwrap(), caps[1].unwrap())
-            };
+        let mut caps = [None, None];
+        if !exec(self.re, &mut caps, self.search, self.last_end) {
+            return None;
+        }
+        let (s, e) = (caps[0].unwrap(), caps[1].unwrap());
 
         // Don't accept empty matches immediately following a match.
         // i.e., no infinite loops please.
@@ -1089,19 +1085,9 @@ unsafe impl<'r, 't> Searcher<'t> for RegexSearcher<'r, 't> {
     }
 }
 
-fn exec(re: &Regex, which: MatchKind, input: &str) -> CaptureLocs {
-    exec_slice(re, which, input, 0)
-}
-
-fn exec_slice(re: &Regex, which: MatchKind,
-              text: &str, s: usize) -> CaptureLocs {
+fn exec(re: &Regex, caps: &mut CaptureIdxs, text: &str, s: usize) -> bool {
     match *re {
-        Regex::Dynamic(ref prog) => Nfa::run(which, prog, text, s),
-        Regex::Native(ExNative { ref prog, .. }) => (*prog)(which, text, s),
+        Regex::Dynamic(ref prog) => Nfa::run(prog, caps, text, s),
+        Regex::Native(ExNative { ref prog, .. }) => (*prog)(caps, text, s),
     }
-}
-
-#[inline]
-fn has_match(caps: &CaptureLocs) -> bool {
-    caps.len() >= 2 && caps[0].is_some() && caps[1].is_some()
 }

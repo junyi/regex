@@ -54,7 +54,16 @@ impl Compiler {
             }
             Expr::AnyChar => self.push(Ranges(CharRanges::any())),
             Expr::AnyCharNoNL => self.push(Ranges(CharRanges::any_nonl())),
-            Expr::Class(cls) => self.push(Ranges(CharRanges::from_class(cls))),
+            Expr::Class(cls) => {
+                if cls.len() == 1 && cls[0].start == cls[0].end {
+                    self.push(Char(OneChar {
+                        c: cls[0].start,
+                        casei: cls.is_case_insensitive(),
+                    }));
+                } else {
+                    self.push(Ranges(CharRanges::from_class(cls)));
+                }
+            }
             Expr::StartLine => self.push(EmptyLook(StartLine)),
             Expr::EndLine => self.push(EmptyLook(EndLine)),
             Expr::StartText => self.push(EmptyLook(StartText)),

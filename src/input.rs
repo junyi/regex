@@ -1,3 +1,5 @@
+use std::cmp;
+
 use char::Char;
 
 pub trait Input {
@@ -6,7 +8,7 @@ pub trait Input {
     fn next(&self) -> Char;
     fn set(&mut self, byte_offset: usize);
     fn advance(&mut self);
-    fn advance_prefix(&mut self, prefix: &str) -> bool;
+    fn advance_prefix(&mut self, prefixes: &[String]) -> bool;
 
     fn beginning(&self) -> bool { self.next_byte_offset() == 0 }
     fn done(&self) -> bool { self.cur().is_none() }
@@ -50,21 +52,23 @@ impl<'t> Input for CharInput<'t> {
         self.next = self.s[self.next_offset..].chars().next().into();
     }
 
-    fn advance_prefix(&mut self, prefix: &str) -> bool {
+    fn advance_prefix(&mut self, prefixes: &[String]) -> bool {
         let nexti = self.next_offset;
-        let needle = prefix.as_bytes();
         let haystack = &self.s.as_bytes()[nexti..];
-        match find_prefix(needle, haystack) {
-            None => false,
-            Some(i) => { self.set(nexti + i); true }
+        if prefixes.len() == 1 {
+            match find_prefix(prefixes[0].as_bytes(), haystack) {
+                None => false,
+                Some(i) => { self.set(nexti + i); true }
+            }
+        } else {
+            match find_prefixes(prefixes, haystack) {
+                None => false,
+                Some(i) => { self.set(nexti + i); true }
+            }
         }
     }
 }
 
-/// Returns the starting location of `needle` in `haystack`.
-/// If `needle` is not in `haystack`, then `None` is returned.
-///
-/// Note that this is using a naive substring algorithm.
 #[inline]
 pub fn find_prefix(needle: &[u8], haystack: &[u8]) -> Option<usize> {
     let (hlen, nlen) = (haystack.len(), needle.len());
@@ -77,4 +81,29 @@ pub fn find_prefix(needle: &[u8], haystack: &[u8]) -> Option<usize> {
         }
     }
     None
+}
+
+#[inline]
+pub fn find_prefixes(needles: &[String], haystack: &[u8]) -> Option<usize> {
+    for hi in 0..haystack.len() {
+        for needle in needles {
+            let ub = cmp::min(hi + needle.len(), haystack.len());
+            if &haystack[hi..ub] == needle.as_bytes() {
+                return Some(hi);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_find_prefixes() {
+        let needles = &[
+            "abaa".into(), "abbaa".into(), "abbbaa".into(), "abbbbaa".into(),
+        ];
+        let haystack = b"ababbabbbabbbabbbbabbbbaa";
+        assert_eq!(super::find_prefixes(needles, haystack), Some(18));
+    }
 }

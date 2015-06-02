@@ -106,8 +106,8 @@ impl<'r, 't> Nfa<'r, 't> {
                 // BUT, if there's a literal prefix for the program, try to
                 // jump ahead quickly. If it can't be found, then we can bail
                 // out early.
-                if self.prog.prefix.len() > 0
-                        && !self.input.advance_prefix(&self.prog.prefix) {
+                if self.prog.prefixes.len() > 0
+                        && !self.input.advance_prefix(&self.prog.prefixes) {
                     // Has a prefix but we couldn't find one, so we're done.
                     break;
                 }

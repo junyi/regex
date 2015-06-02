@@ -429,9 +429,8 @@ pub mod native {
     //
     // On the bright side, `rustdoc` lets us hide this from the public API
     // documentation.
-    pub use program::{Inst, Program};
+    pub use program::{CharRanges, Inst, LookInst, OneChar, Program};
     pub use syntax::simple_case_fold;
-    pub use nfa::MatchKind::{self, Exists, Location, Submatches};
     pub use re::ExNative;
     pub use re::Regex::{Dynamic, Native};
 }

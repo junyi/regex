@@ -54,6 +54,22 @@ pub enum LookInst {
     NotWordBoundary,
 }
 
+impl Inst {
+    fn as_literal(&self) -> Option<char> {
+        match *self {
+            Inst::Char(OneChar { c, casei: false }) => Some(c),
+            _ => None,
+        }
+    }
+
+    fn is_literal(&self) -> bool {
+        match *self {
+            Inst::Char(OneChar { casei: false, .. }) => true,
+            _ => false,
+        }
+    }
+}
+
 impl OneChar {
     pub fn matches(&self, c: Char) -> bool {
         self.c == c || (self.casei && self.c == c.case_fold())
@@ -145,9 +161,7 @@ pub struct Program {
     pub cap_names: Vec<Option<String>>,
     /// If the regular expression requires a literal prefix in order to have a
     /// match, that prefix is stored here.
-    pub prefix: String,
-    /// If matching the prefix results in a match, this is true.
-    pub prefix_complete: bool,
+    pub prefixes: Vec<String>,
     /// True iff program is anchored at the beginning.
     pub anchored_begin: bool,
     /// True iff program is anchored at the end.
@@ -167,24 +181,13 @@ impl Program {
             original: re.into(),
             insts: insts,
             cap_names: cap_names,
-            prefix: String::new(),
-            prefix_complete: false,
+            prefixes: vec![],
             anchored_begin: false,
             anchored_end: false,
             nfa_threads: Pool::new(Box::new(create_threads)),
         };
 
-        // Try to discover a literal string prefix.
-        // This is a bit hacky since we have to skip over the initial
-        // 'Save' instruction.
-        for inst in prog.insts[1..].iter() {
-            match *inst {
-                Inst::Char(OneChar { c, casei: false }) => {
-                    prog.prefix.push(c);
-                }
-                _ => break
-            }
-        }
+        prog.find_prefixes();
         prog.anchored_begin = match prog.insts[1] {
             Inst::EmptyLook(LookInst::StartText) => true,
             _ => false,
@@ -201,6 +204,56 @@ impl Program {
     pub fn num_captures(&self) -> usize {
         num_captures(&self.insts)
     }
+
+    pub fn alloc_captures(&self) -> Vec<Option<usize>> {
+        vec![None; 2 * self.num_captures()]
+    }
+
+    pub fn find_prefixes(&mut self) {
+        use self::Inst::*;
+
+        fn prefix(insts: &[Inst]) -> String {
+            let mut s = String::new();
+            for inst in insts {
+                match inst.as_literal() {
+                    Some(c) => s.push(c),
+                    None => break,
+                }
+            }
+            s
+        }
+        if self.insts[1].is_literal() {
+            self.prefixes.push(prefix(&self.insts[1..]));
+            return;
+        }
+        let mut pc = 1;
+        let mut prefixes = vec![];
+        loop {
+            match self.insts[pc] {
+                Split(x, y) => {
+                    match (&self.insts[x], &self.insts[y]) {
+                        (&Char(OneChar { casei: false, .. }),
+                         &Char(OneChar { casei: false, .. })) => {
+                            prefixes.push(prefix(&self.insts[x..]));
+                            prefixes.push(prefix(&self.insts[y..]));
+                            break;
+                        }
+                        (&Char(OneChar { casei: false, .. }), &Split(_, _)) => {
+                            prefixes.push(prefix(&self.insts[x..]));
+                            pc = y;
+                        }
+                        (&Split(_, _), &Char(OneChar { casei: false, .. })) => {
+                            prefixes.push(prefix(&self.insts[y..]));
+                            pc = x;
+                        }
+                        _ => return,
+                    }
+                }
+                _ => return,
+            }
+        }
+        self.prefixes = prefixes;
+    }
 }
 
 impl Clone for Program {
@@ -211,8 +264,7 @@ impl Clone for Program {
             original: self.original.clone(),
             insts: self.insts.clone(),
             cap_names: self.cap_names.clone(),
-            prefix: self.prefix.clone(),
-            prefix_complete: self.prefix_complete,
+            prefixes: self.prefixes.clone(),
             anchored_begin: self.anchored_begin,
             anchored_end: self.anchored_end,
             nfa_threads: Pool::new(Box::new(create_threads)),

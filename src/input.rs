@@ -55,16 +55,16 @@ impl<'t> Input for CharInput<'t> {
     fn advance_prefix(&mut self, prefixes: &[String]) -> bool {
         let nexti = self.next_offset;
         let haystack = &self.s.as_bytes()[nexti..];
-        if prefixes.len() == 1 {
-            match find_prefix(prefixes[0].as_bytes(), haystack) {
+        match prefixes.len() {
+            0 => true, // empty prefix always matches!
+            1 => match find_prefix(prefixes[0].as_bytes(), haystack) {
                 None => false,
                 Some(i) => { self.set(nexti + i); true }
-            }
-        } else {
-            match find_prefixes(prefixes, haystack) {
+            },
+            _ => match find_prefixes(prefixes, haystack) {
                 None => false,
                 Some(i) => { self.set(nexti + i); true }
-            }
+            },
         }
     }
 }

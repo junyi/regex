@@ -33,8 +33,6 @@
 //
 // [1] - http://swtch.com/~rsc/regex/regex3.html
 
-use std::mem;
-
 use program::Program;
 use input::{Input, CharInput};
 
@@ -46,35 +44,13 @@ pub struct Nfa<'r, 't> {
     input: CharInput<'t>,
 }
 
-/// Indicates the next action to take after a single non-empty instruction
-/// is processed.
-#[derive(Copy, Clone, Debug)]
-pub enum Step {
-    /// This is returned if and only if a Match instruction is reached and
-    /// we only care about the existence of a match. It instructs the VM to
-    /// quit early.
-    MatchEarlyReturn,
-    /// Indicates that a match was found. Thus, the rest of the states in the
-    /// *current* queue should be dropped (i.e., leftmost-first semantics).
-    /// States in the "next" queue can still be processed.
-    Match,
-    /// No match was found. Continue with the next state in the queue.
-    Continue,
-}
-
 impl<'r, 't> Nfa<'r, 't> {
-    /// Runs an NFA simulation on the compiled expression given on the search
-    /// text `input`. The search begins at byte index `start` and ends at byte
-    /// index `end`. (The range is specified here so that zero-width assertions
-    /// will work correctly when searching for successive non-overlapping
-    /// matches.)
-    ///
-    /// The `which` parameter indicates what kind of capture information the
-    /// caller wants. There are three choices: match existence only, the
-    /// location of the entire match or the locations of the entire match in
-    /// addition to the locations of each submatch.
-    pub fn run(prog: &'r Program, mut caps: &mut CaptureIdxs, text: &'t str,
-               start: usize) -> bool {
+    pub fn run(
+        prog: &'r Program,
+        mut caps: &mut CaptureIdxs,
+        text: &'t str,
+        start: usize,
+    ) -> bool {
         let mut q = prog.nfa_threads.get();
         let matched = Nfa {
             prog: prog,
@@ -84,31 +60,30 @@ impl<'r, 't> Nfa<'r, 't> {
         matched
     }
 
-    fn exec(&mut self, mut q: &mut NfaThreads, mut caps: &mut CaptureIdxs) -> bool {
+    fn exec(
+        &mut self,
+        mut q: &mut NfaThreads,
+        mut caps: &mut CaptureIdxs,
+    ) -> bool {
         let mut matched = false;
         q.clist.empty(); q.nlist.empty();
 'LOOP:  loop {
             if q.clist.size == 0 {
-                // We have a match and we're done exploring alternatives.
-                // Time to quit.
-                if matched {
-                    break
-                }
-
-                // If the expression starts with a '^' we can terminate as soon
-                // as the last thread dies.
-                if !self.input.beginning() && self.prog.anchored_begin {
-                    break;
-                }
-
-                // If there are no threads to try, then we'll have to start
-                // over at the beginning of the regex.
-                // BUT, if there's a literal prefix for the program, try to
-                // jump ahead quickly. If it can't be found, then we can bail
-                // out early.
-                if self.prog.prefixes.len() > 0
-                        && !self.input.advance_prefix(&self.prog.prefixes) {
-                    // Has a prefix but we couldn't find one, so we're done.
+                // Three ways to bail out when our current set of threads is
+                // empty.
+                //
+                // 1. We have a match---so we're done exploring any possible
+                //    alternatives.  Time to quit.
+                //
+                // 2. If the expression starts with a '^' we can terminate as
+                //    soon as the last thread dies.
+                //
+                // 3. If there's a literal prefix for the program, try to
+                //    jump ahead quickly. If it can't be found, then we can
+                //    bail out early.
+                if matched
+                   || (!self.input.beginning() && self.prog.anchored_begin)
+                   || !self.input.advance_prefix(&self.prog.prefixes) {
                     break;
                 }
             }
@@ -126,55 +101,66 @@ impl<'r, 't> Nfa<'r, 't> {
             self.input.advance();
             for i in 0..q.clist.size {
                 let pc = q.clist.pc(i);
-                let step_state = self.step(caps, &mut q.nlist,
-                                           q.clist.groups(i), pc);
-                match step_state {
-                    Step::MatchEarlyReturn => { matched = true; break 'LOOP }
-                    Step::Match => { matched = true; break }
-                    Step::Continue => {}
+                if self.step(caps, &mut q.nlist, q.clist.caps(i), pc) {
+                    matched = true;
+                    if caps.len() == 0 {
+                        // If we only care if a match occurs (not its
+                        // position), then we can quit right now.
+                        break 'LOOP;
+                    }
+                    // We don't need to check the rest of the threads in this
+                    // set because we've matched something ("leftmost-first").
+                    // However, we still need to check threads in the next set
+                    // to support things like greedy matching.
+                    break;
                 }
             }
-            if self.input.cur().is_none() {
+            if self.input.done() {
                 break;
             }
-            mem::swap(&mut q.clist, &mut q.nlist);
+            q.swap();
             q.nlist.empty();
         }
         matched
     }
 
-    fn step(&self, caps: &mut [Option<usize>], nlist: &mut Threads,
-            thread_caps: &mut [Option<usize>], pc: usize)
-           -> Step {
+    fn step(
+        &self,
+        caps: &mut [Option<usize>],
+        nlist: &mut Threads,
+        thread_caps: &mut [Option<usize>],
+        pc: usize,
+    ) -> bool {
         use program::Inst::*;
-
         match self.prog.insts[pc] {
             Match => {
-                if caps.len() == 0 {
-                    return Step::MatchEarlyReturn;
-                } else {
-                    for (slot, val) in caps.iter_mut().zip(thread_caps.iter()) {
-                        *slot = *val;
-                    }
-                    return Step::Match;
+                for (slot, val) in caps.iter_mut().zip(thread_caps.iter()) {
+                    *slot = *val;
                 }
+                true
             }
             Char(ref inst) => {
                 if inst.matches(self.input.cur()) {
                     self.add(nlist, pc+1, thread_caps);
                 }
+                false
             }
             Ranges(ref inst) => {
                 if inst.matches(self.input.cur()).is_some() {
                     self.add(nlist, pc+1, thread_caps);
                 }
+                false
             }
-            EmptyLook(_) | Save(_) | Jump(_) | Split(_, _) => {},
+            EmptyLook(_) | Save(_) | Jump(_) | Split(_, _) => false,
         }
-        Step::Continue
     }
 
-    fn add(&self, nlist: &mut Threads, pc: usize, thread_caps: &mut [Option<usize>]) {
+    fn add(
+        &self,
+        nlist: &mut Threads,
+        pc: usize,
+        thread_caps: &mut [Option<usize>],
+    ) {
         use program::Inst::*;
 
         if nlist.contains(pc) {
@@ -205,7 +191,7 @@ impl<'r, 't> Nfa<'r, 't> {
                 self.add(nlist, y, thread_caps);
             }
             Match | Char(_) | Ranges(_) => {
-                let mut t = &mut nlist.queue[ti];
+                let mut t = &mut nlist.thread(ti);
                 for (slot, val) in t.caps.iter_mut().zip(thread_caps.iter()) {
                     *slot = *val;
                 }
@@ -222,7 +208,7 @@ pub struct NfaThreads {
 
 #[derive(Debug)]
 struct Threads {
-    queue: Vec<Thread>,
+    dense: Vec<Thread>,
     sparse: Vec<usize>,
     size: usize,
 }
@@ -240,13 +226,17 @@ impl NfaThreads {
             nlist: Threads::new(num_insts, ncaps),
         }
     }
+
+    fn swap(&mut self) {
+        ::std::mem::swap(&mut self.clist, &mut self.nlist);
+    }
 }
 
 impl Threads {
     fn new(num_insts: usize, ncaps: usize) -> Threads {
         let t = Thread { pc: 0, caps: vec![None; ncaps * 2] };
         Threads {
-            queue: vec![t; num_insts],
+            dense: vec![t; num_insts],
             sparse: vec![0; num_insts],
             size: 0,
         }
@@ -255,16 +245,21 @@ impl Threads {
     #[inline]
     fn add(&mut self, pc: usize) -> usize {
         let i = self.size;
-        self.queue[i].pc = pc;
+        self.dense[i].pc = pc;
         self.sparse[pc] = i;
         self.size += 1;
         i
     }
 
     #[inline]
+    fn thread(&mut self, i: usize) -> &mut Thread {
+        &mut self.dense[i]
+    }
+
+    #[inline]
     fn contains(&self, pc: usize) -> bool {
         let s = self.sparse[pc];
-        s < self.size && self.queue[s].pc == pc
+        s < self.size && self.dense[s].pc == pc
     }
 
     #[inline]
@@ -274,11 +269,11 @@ impl Threads {
 
     #[inline]
     fn pc(&self, i: usize) -> usize {
-        self.queue[i].pc
+        self.dense[i].pc
     }
 
     #[inline]
-    fn groups(&mut self, i: usize) -> &mut [Option<usize>] {
-        &mut self.queue[i].caps
+    fn caps(&mut self, i: usize) -> &mut [Option<usize>] {
+        &mut self.dense[i].caps
     }
 }

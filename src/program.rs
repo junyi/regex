@@ -68,6 +68,13 @@ impl Inst {
             _ => false,
         }
     }
+
+    fn is_save(&self) -> bool {
+        match *self {
+            Inst::Save(_) => true,
+            _ => false,
+        }
+    }
 }
 
 impl OneChar {
@@ -214,7 +221,7 @@ impl Program {
 
         fn prefix(insts: &[Inst]) -> String {
             let mut s = String::new();
-            for inst in insts {
+            for inst in insts.iter().filter(|inst| !inst.is_save()) {
                 match inst.as_literal() {
                     Some(c) => s.push(c),
                     None => break,
@@ -228,26 +235,21 @@ impl Program {
         }
         let mut pc = 1;
         let mut prefixes = vec![];
-        loop {
-            match self.insts[pc] {
-                Split(x, y) => {
-                    match (&self.insts[x], &self.insts[y]) {
-                        (&Char(OneChar { casei: false, .. }),
-                         &Char(OneChar { casei: false, .. })) => {
-                            prefixes.push(prefix(&self.insts[x..]));
-                            prefixes.push(prefix(&self.insts[y..]));
-                            break;
-                        }
-                        (&Char(OneChar { casei: false, .. }), &Split(_, _)) => {
-                            prefixes.push(prefix(&self.insts[x..]));
-                            pc = y;
-                        }
-                        (&Split(_, _), &Char(OneChar { casei: false, .. })) => {
-                            prefixes.push(prefix(&self.insts[y..]));
-                            pc = x;
-                        }
-                        _ => return,
-                    }
+        while let Split(x, y) = self.insts[pc] {
+            match (&self.insts[x], &self.insts[y]) {
+                (&Char(OneChar { casei: false, .. }),
+                 &Char(OneChar { casei: false, .. })) => {
+                    prefixes.push(prefix(&self.insts[x..]));
+                    prefixes.push(prefix(&self.insts[y..]));
+                    break;
+                }
+                (&Char(OneChar { casei: false, .. }), &Split(_, _)) => {
+                    prefixes.push(prefix(&self.insts[x..]));
+                    pc = y;
+                }
+                (&Split(_, _), &Char(OneChar { casei: false, .. })) => {
+                    prefixes.push(prefix(&self.insts[y..]));
+                    pc = x;
                 }
                 _ => return,
             }

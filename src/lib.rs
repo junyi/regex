@@ -387,6 +387,7 @@
 //! some other regular expression engines. (We pay for this by disallowing
 //! features like arbitrary look-ahead and back-references.)
 
+#![allow(dead_code, unused_imports, unused_variables)]
 // #![deny(missing_docs)]
 // #![cfg_attr(test, deny(warnings))]
 #![cfg_attr(feature = "pattern", feature(core))]
@@ -403,6 +404,7 @@ pub use re::{
     quote, is_match,
 };
 
+mod backtrack;
 mod char;
 mod compile;
 mod input;

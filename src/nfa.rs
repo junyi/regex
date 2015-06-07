@@ -33,10 +33,9 @@
 //
 // [1] - http://swtch.com/~rsc/regex/regex3.html
 
+use input::{Input, InputAt, CharInput};
 use program::Program;
-use input::{Input, CharInput};
-
-pub type CaptureIdxs = [Option<usize>];
+use re::CaptureIdxs;
 
 #[derive(Debug)]
 pub struct Nfa<'r, 't> {
@@ -45,25 +44,28 @@ pub struct Nfa<'r, 't> {
 }
 
 impl<'r, 't> Nfa<'r, 't> {
-    pub fn run(
+    pub fn exec(
         prog: &'r Program,
         mut caps: &mut CaptureIdxs,
         text: &'t str,
         start: usize,
     ) -> bool {
         let mut q = prog.nfa_threads.get();
+        let input = CharInput::new(text);
+        let at = input.at(start);
         let matched = Nfa {
             prog: prog,
-            input: CharInput::new(text, start),
-        }.exec(&mut q, &mut caps);
+            input: input,
+        }.exec_(&mut q, &mut caps, at);
         prog.nfa_threads.put(q);
         matched
     }
 
-    fn exec(
+    fn exec_(
         &mut self,
         mut q: &mut NfaThreads,
         mut caps: &mut CaptureIdxs,
+        mut at: InputAt,
     ) -> bool {
         let mut matched = false;
         q.clist.empty(); q.nlist.empty();
@@ -77,14 +79,19 @@ impl<'r, 't> Nfa<'r, 't> {
                 //
                 // 2. If the expression starts with a '^' we can terminate as
                 //    soon as the last thread dies.
-                //
+                if matched
+                   || (!at.is_beginning() && self.prog.anchored_begin) {
+                    break;
+                }
+
                 // 3. If there's a literal prefix for the program, try to
                 //    jump ahead quickly. If it can't be found, then we can
                 //    bail out early.
-                if matched
-                   || (!self.input.beginning() && self.prog.anchored_begin)
-                   || !self.input.advance_prefix(&self.prog.prefixes) {
-                    break;
+                if !self.prog.prefixes.is_empty() {
+                    at = match self.input.prefix_at(&self.prog.prefixes, at) {
+                        None => break,
+                        Some(at) => at,
+                    };
                 }
             }
 
@@ -92,16 +99,16 @@ impl<'r, 't> Nfa<'r, 't> {
             // a state starting at the current position in the input for the
             // beginning of the program only if we don't already have a match.
             if q.clist.size == 0 || (!self.prog.anchored_begin && !matched) {
-                self.add(&mut q.clist, 0, &mut caps)
+                self.add(&mut q.clist, &mut caps, 0, at)
             }
             // The previous call to "add" actually inspects the position just
             // before the current character. For stepping through the machine,
             // we can to look at the current character, so we advance the
             // input.
-            self.input.advance();
+            let at_next = self.input.at(at.next_pos());
             for i in 0..q.clist.size {
                 let pc = q.clist.pc(i);
-                if self.step(caps, &mut q.nlist, q.clist.caps(i), pc) {
+                if self.step(&mut q.nlist, caps, q.clist.caps(i), pc, at, at_next) {
                     matched = true;
                     if caps.len() == 0 {
                         // If we only care if a match occurs (not its
@@ -115,9 +122,10 @@ impl<'r, 't> Nfa<'r, 't> {
                     break;
                 }
             }
-            if self.input.done() {
+            if at.is_end() {
                 break;
             }
+            at = at_next;
             q.swap();
             q.nlist.empty();
         }
@@ -126,10 +134,12 @@ impl<'r, 't> Nfa<'r, 't> {
 
     fn step(
         &self,
-        caps: &mut [Option<usize>],
         nlist: &mut Threads,
+        caps: &mut [Option<usize>],
         thread_caps: &mut [Option<usize>],
         pc: usize,
+        at: InputAt,
+        at_next: InputAt,
     ) -> bool {
         use program::Inst::*;
         match self.prog.insts[pc] {
@@ -140,14 +150,14 @@ impl<'r, 't> Nfa<'r, 't> {
                 true
             }
             Char(ref inst) => {
-                if inst.matches(self.input.cur()) {
-                    self.add(nlist, pc+1, thread_caps);
+                if inst.matches(at.char()) {
+                    self.add(nlist, thread_caps, pc+1, at_next);
                 }
                 false
             }
             Ranges(ref inst) => {
-                if inst.matches(self.input.cur()).is_some() {
-                    self.add(nlist, pc+1, thread_caps);
+                if inst.matches(at.char()).is_some() {
+                    self.add(nlist, thread_caps, pc+1, at_next);
                 }
                 false
             }
@@ -158,8 +168,9 @@ impl<'r, 't> Nfa<'r, 't> {
     fn add(
         &self,
         nlist: &mut Threads,
-        pc: usize,
         thread_caps: &mut [Option<usize>],
+        pc: usize,
+        at: InputAt,
     ) {
         use program::Inst::*;
 
@@ -169,26 +180,27 @@ impl<'r, 't> Nfa<'r, 't> {
         let ti = nlist.add(pc);
         match self.prog.insts[pc] {
             EmptyLook(ref inst) => {
-                if inst.matches(self.input.cur(), self.input.next()) {
-                    self.add(nlist, pc + 1, thread_caps);
+                let prev = self.input.previous_at(at.pos());
+                if inst.matches(prev.char(), at.char()) {
+                    self.add(nlist, thread_caps, pc+1, at);
                 }
             }
             Save(slot) => {
                 if slot >= thread_caps.len() {
-                    self.add(nlist, pc + 1, thread_caps);
+                    self.add(nlist, thread_caps, pc+1, at);
                 } else {
                     let old = thread_caps[slot];
-                    thread_caps[slot] = Some(self.input.next_byte_offset());
-                    self.add(nlist, pc + 1, thread_caps);
+                    thread_caps[slot] = Some(at.pos());
+                    self.add(nlist, thread_caps, pc+1, at);
                     thread_caps[slot] = old;
                 }
             }
             Jump(to) => {
-                self.add(nlist, to, thread_caps)
+                self.add(nlist, thread_caps, to, at)
             }
             Split(x, y) => {
-                self.add(nlist, x, thread_caps);
-                self.add(nlist, y, thread_caps);
+                self.add(nlist, thread_caps, x, at);
+                self.add(nlist, thread_caps, y, at);
             }
             Match | Char(_) | Ranges(_) => {
                 let mut t = &mut nlist.thread(ti);

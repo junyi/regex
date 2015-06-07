@@ -16,11 +16,13 @@ use std::fmt;
 use std::str::pattern::{Pattern, Searcher, SearchStep};
 use std::str::FromStr;
 
-use nfa::{CaptureIdxs, Nfa};
+use backtrack::Backtrack;
+use nfa::Nfa;
 use program::Program;
 use syntax;
 
-use self::NamesIter::*;
+/// Type alias for representing capture indices.
+pub type CaptureIdxs = [Option<usize>];
 
 /// Escapes all regular expression meta characters in `text`.
 ///
@@ -257,7 +259,7 @@ impl Regex {
     /// # }
     /// ```
     pub fn is_match(&self, text: &str) -> bool {
-        exec(self, &mut [], text, 0)
+        Engine::exec(self, &mut [], text, 0)
     }
 
     /// Returns the start and end byte range of the leftmost-first match in
@@ -282,7 +284,7 @@ impl Regex {
     /// ```
     pub fn find(&self, text: &str) -> Option<(usize, usize)> {
         let mut caps = [None, None];
-        if exec(self, &mut caps, text, 0) {
+        if Engine::exec(self, &mut caps, text, 0) {
             Some((caps[0].unwrap(), caps[1].unwrap()))
         } else {
             None
@@ -374,7 +376,7 @@ impl Regex {
     /// accessed with `at(0)`.
     pub fn captures<'t>(&self, text: &'t str) -> Option<Captures<'t>> {
         let mut caps = self.alloc_captures();
-        if exec(self, &mut caps, text, 0) {
+        if Engine::exec(self, &mut caps, text, 0) {
             Some(Captures::new(self, text, caps))
         } else {
             None
@@ -591,8 +593,8 @@ impl Regex {
     #[doc(hidden)]
     pub fn names_iter<'a>(&'a self) -> NamesIter<'a> {
         match *self {
-            Regex::Native(ref n) => NamesIterNative(n.names.iter()),
-            Regex::Dynamic(ref d) => NamesIterDynamic(d.cap_names.iter())
+            Regex::Native(ref n) => NamesIter::Native(n.names.iter()),
+            Regex::Dynamic(ref d) => NamesIter::Dynamic(d.cap_names.iter())
         }
     }
 
@@ -612,8 +614,8 @@ impl Regex {
 }
 
 pub enum NamesIter<'a> {
-    NamesIterNative(::std::slice::Iter<'a, Option<&'static str>>),
-    NamesIterDynamic(::std::slice::Iter<'a, Option<String>>)
+    Native(::std::slice::Iter<'a, Option<&'static str>>),
+    Dynamic(::std::slice::Iter<'a, Option<String>>)
 }
 
 impl<'a> Iterator for NamesIter<'a> {
@@ -621,9 +623,9 @@ impl<'a> Iterator for NamesIter<'a> {
 
     fn next(&mut self) -> Option<Option<String>> {
         match *self {
-            NamesIterNative(ref mut i) =>
+            NamesIter::Native(ref mut i) =>
                 i.next().map(|x| x.map(|s| s.to_owned())),
-            NamesIterDynamic(ref mut i) =>
+            NamesIter::Dynamic(ref mut i) =>
                 i.next().map(|x| x.as_ref().map(|s| s.to_owned())),
         }
     }
@@ -960,7 +962,7 @@ impl<'r, 't> Iterator for FindCaptures<'r, 't> {
         }
 
         let mut caps = self.re.alloc_captures();
-        if !exec(self.re, &mut caps, self.search, self.last_end) {
+        if !Engine::exec(self.re, &mut caps, self.search, self.last_end) {
             return None
         }
         let (s, e) = (caps[0].unwrap(), caps[1].unwrap());
@@ -1005,7 +1007,7 @@ impl<'r, 't> Iterator for FindMatches<'r, 't> {
         }
 
         let mut caps = [None, None];
-        if !exec(self.re, &mut caps, self.search, self.last_end) {
+        if !Engine::exec(self.re, &mut caps, self.search, self.last_end) {
             return None;
         }
         let (s, e) = (caps[0].unwrap(), caps[1].unwrap());
@@ -1085,9 +1087,44 @@ unsafe impl<'r, 't> Searcher<'t> for RegexSearcher<'r, 't> {
     }
 }
 
-fn exec(re: &Regex, caps: &mut CaptureIdxs, text: &str, s: usize) -> bool {
-    match *re {
-        Regex::Dynamic(ref prog) => Nfa::run(prog, caps, text, s),
-        Regex::Native(ExNative { ref prog, .. }) => (*prog)(caps, text, s),
+#[derive(Debug)]
+#[doc(hidden)]
+enum Engine {
+    Backtrack,
+    Nfa,
+}
+
+impl Engine {
+    fn exec(
+        re: &Regex,
+        caps: &mut CaptureIdxs,
+        text: &str,
+        s: usize,
+    ) -> bool {
+        match *re {
+            // Native is always a simple function call.
+            Regex::Native(ExNative { ref prog, .. }) => (*prog)(caps, text, s),
+            Regex::Dynamic(ref prog) => {
+                let mut engine = Engine::Nfa;
+                if prog.insts.len() <= 500 {
+                    engine = Engine::Backtrack;
+                }
+                engine.exec_one(prog, caps, text, s)
+            }
+        }
+    }
+
+    fn exec_one(
+        &self,
+        prog: &Program,
+        caps: &mut CaptureIdxs,
+        text: &str,
+        s: usize,
+    ) -> bool {
+        match *self {
+            _ => Nfa::exec(prog, caps, text, s),
+            // Engine::Backtrack => Backtrack::exec(prog, caps, text, s),
+            // Engine::Nfa => Nfa::exec(prog, caps, text, s),
+        }
     }
 }

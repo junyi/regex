@@ -1,75 +1,113 @@
 use std::cmp;
+use std::ops;
 
 use char::Char;
 
-pub trait Input {
-    fn next_byte_offset(&self) -> usize;
-    fn cur(&self) -> Char;
-    fn next(&self) -> Char;
-    fn set(&mut self, byte_offset: usize);
-    fn advance(&mut self);
-    fn advance_prefix(&mut self, prefixes: &[String]) -> bool;
+#[derive(Clone, Copy, Debug)]
+pub struct InputAt {
+    pos: usize,
+    c: Char,
+    len: usize,
+}
 
-    fn beginning(&self) -> bool { self.next_byte_offset() == 0 }
-    fn done(&self) -> bool { self.cur().is_none() }
+impl InputAt {
+    pub fn beginning() -> InputAt {
+        InputAt {
+            pos: 0,
+            c: None.into(),
+            len: 0,
+        }
+    }
+
+    pub fn is_beginning(&self) -> bool {
+        self.pos == 0
+    }
+
+    pub fn is_end(&self) -> bool {
+        self.c.is_none()
+    }
+
+    pub fn char(&self) -> Char {
+        self.c
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    pub fn next_pos(&self) -> usize {
+        self.pos + self.len
+    }
+}
+
+pub trait Input {
+    fn at(&self, i: usize) -> InputAt;
+    fn previous_at(&self, i: usize) -> InputAt;
+    fn start_at(&self, i: usize) -> InputAt;
+    fn prefix_at(&self, prefixes: &[String], at: InputAt) -> Option<InputAt>;
 }
 
 #[derive(Debug)]
-pub struct CharInput<'t> {
-    s: &'t str,
-    cur: Char,
-    next: Char,
-    next_offset: usize,
-}
+pub struct CharInput<'t>(&'t str);
 
 impl<'t> CharInput<'t> {
-    pub fn new(s: &'t str, start: usize) -> CharInput<'t> {
-        let mut inp = CharInput {
-            s: s,
-            cur: None.into(),
-            next: None.into(),
-            next_offset: 0,
-        };
-        inp.set(start);
-        inp
+    pub fn new(s: &'t str) -> CharInput<'t> {
+        CharInput(s)
+    }
+}
+
+impl<'t> ops::Deref for CharInput<'t> {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.0
     }
 }
 
 impl<'t> Input for CharInput<'t> {
-    #[inline] fn next_byte_offset(&self) -> usize { self.next_offset }
-    #[inline] fn cur(&self) -> Char { self.cur }
-    #[inline] fn next(&self) -> Char { self.next }
-
-    fn set(&mut self, i: usize) {
-        self.next_offset = i;
-        self.cur = self.s[..i].chars().rev().next().into();
-        self.next = self.s[self.next_offset..].chars().next().into();
-    }
-
-    fn advance(&mut self) {
-        self.cur = self.next;
-        self.next_offset += self.cur.len_utf8();
-        self.next = self.s[self.next_offset..].chars().next().into();
-    }
-
-    fn advance_prefix(&mut self, prefixes: &[String]) -> bool {
-        let nexti = self.next_offset;
-        let haystack = &self.s.as_bytes()[nexti..];
-        match prefixes.len() {
-            0 => true, // empty prefix always matches!
-            1 => match find_prefix(prefixes[0].as_bytes(), haystack) {
-                None => false,
-                Some(i) => { self.set(nexti + i); true }
-            },
-            _ => match find_prefixes(prefixes, haystack) {
-                None => false,
-                Some(i) => { self.set(nexti + i); true }
-            },
+    fn at(&self, i: usize) -> InputAt {
+        let c = self[i..].chars().next().into();
+        InputAt {
+            pos: i,
+            c: c,
+            len: c.len_utf8(),
         }
+    }
+
+    fn previous_at(&self, i: usize) -> InputAt {
+        let c: Char = self[..i].chars().rev().next().into();
+        let len = c.len_utf8();
+        InputAt {
+            pos: i - len,
+            c: c,
+            len: len,
+        }
+    }
+
+    fn start_at(&self, i: usize) -> InputAt {
+        let c: Char = self[..i].chars().rev().next().into();
+        let len = c.len_utf8();
+        InputAt {
+            pos: i - len,
+            c: c,
+            len: len,
+        }
+    }
+
+    fn prefix_at(&self, prefixes: &[String], at: InputAt) -> Option<InputAt> {
+        let haystack = &self.as_bytes()[at.pos()..];
+        match prefixes.len() {
+            0 => return Some(at), // empty prefix always matches!
+            1 => find_prefix(prefixes[0].as_bytes(), haystack),
+            _ => find_prefixes(prefixes, haystack),
+        }.map(|adv| self.at(at.pos() + adv))
     }
 }
 
-#[inline]
 pub fn find_prefix(needle: &[u8], haystack: &[u8]) -> Option<usize> {
     let (hlen, nlen) = (haystack.len(), needle.len());
     if nlen > hlen || nlen == 0 {
@@ -83,7 +121,6 @@ pub fn find_prefix(needle: &[u8], haystack: &[u8]) -> Option<usize> {
     None
 }
 
-#[inline]
 pub fn find_prefixes(needles: &[String], haystack: &[u8]) -> Option<usize> {
     for hi in 0..haystack.len() {
         for needle in needles {

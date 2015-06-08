@@ -13,10 +13,12 @@ use std::cmp::{self, Ordering};
 use syntax;
 
 use Error;
+use backtrack::{Backtrack, BackMachine};
 use char::Char;
 use compile::Compiler;
-use nfa::NfaThreads;
+use nfa::{Nfa, NfaThreads};
 use pool::Pool;
+use re::CaptureIdxs;
 
 pub type InstIdx = usize;
 
@@ -151,6 +153,13 @@ impl LookInst {
     }
 }
 
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub enum MatchEngine {
+    Backtrack,
+    Nfa,
+}
+
 /// Program represents a compiled regular expression. Once an expression is
 /// compiled, its representation is immutable and will never change.
 ///
@@ -173,17 +182,27 @@ pub struct Program {
     pub anchored_begin: bool,
     /// True iff program is anchored at the end.
     pub anchored_end: bool,
+    /// The type of matching engine to use.
+    /// When `None` (the default), pick an engine automatically.
+    pub engine: Option<MatchEngine>,
     /// Cached NFA threads.
     pub nfa_threads: Pool<NfaThreads>,
+    /// Cached backtracking memory.
+    pub backtrack: Pool<BackMachine>,
 }
 
 impl Program {
     /// Compiles a Regex.
-    pub fn new(size_limit: usize, re: &str) -> Result<Program, Error> {
+    pub fn new(
+        engine: Option<MatchEngine>,
+        size_limit: usize,
+        re: &str,
+    ) -> Result<Program, Error> {
         let expr = try!(syntax::Expr::parse(re));
         let (insts, cap_names) = try!(Compiler::new(size_limit).compile(expr));
         let (insts_len, ncaps) = (insts.len(), num_captures(&insts));
         let create_threads = move || NfaThreads::new(insts_len, ncaps);
+        let create_backtrack = move || BackMachine::new(insts_len);
         let mut prog = Program {
             original: re.into(),
             insts: insts,
@@ -191,7 +210,9 @@ impl Program {
             prefixes: vec![],
             anchored_begin: false,
             anchored_end: false,
+            engine: engine,
             nfa_threads: Pool::new(Box::new(create_threads)),
+            backtrack: Pool::new(Box::new(create_backtrack)),
         };
 
         prog.find_prefixes();
@@ -204,6 +225,30 @@ impl Program {
             _ => false,
         };
         Ok(prog)
+    }
+
+    /// Executes a compiled regex program.
+    pub fn exec(
+        &self,
+        caps: &mut CaptureIdxs,
+        text: &str,
+        start: usize,
+    ) -> bool {
+        match self.choose_engine(caps.len(), text.len()) {
+            // _ => Nfa::exec(prog, caps, text, s),
+            MatchEngine::Backtrack => Backtrack::exec(self, caps, text, start),
+            MatchEngine::Nfa => Nfa::exec(self, caps, text, start),
+        }
+    }
+
+    fn choose_engine(&self, cap_len: usize, text_len: usize) -> MatchEngine {
+        self.engine.unwrap_or_else(|| {
+            if self.insts.len() <= 500 {
+                MatchEngine::Backtrack
+            } else {
+                MatchEngine::Nfa
+            }
+        })
     }
 
     /// Returns the total number of capture groups in the regular expression.
@@ -262,6 +307,7 @@ impl Clone for Program {
     fn clone(&self) -> Program {
         let (insts_len, ncaps) = (self.insts.len(), self.num_captures());
         let create_threads = move || NfaThreads::new(insts_len, ncaps);
+        let create_backtrack = move || BackMachine::new(insts_len);
         Program {
             original: self.original.clone(),
             insts: self.insts.clone(),
@@ -269,7 +315,9 @@ impl Clone for Program {
             prefixes: self.prefixes.clone(),
             anchored_begin: self.anchored_begin,
             anchored_end: self.anchored_end,
+            engine: self.engine,
             nfa_threads: Pool::new(Box::new(create_threads)),
+            backtrack: Pool::new(Box::new(create_backtrack)),
         }
     }
 }

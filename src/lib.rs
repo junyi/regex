@@ -397,6 +397,7 @@
 
 extern crate regex_syntax as syntax;
 
+pub use program::MatchEngine; // exported for testing
 pub use re::{
     Regex, Error, Captures, SubCaptures, SubCapturesPos, SubCapturesNamed,
     FindCaptures, FindMatches,

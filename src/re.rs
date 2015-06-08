@@ -16,9 +16,7 @@ use std::fmt;
 use std::str::pattern::{Pattern, Searcher, SearchStep};
 use std::str::FromStr;
 
-use backtrack::Backtrack;
-use nfa::Nfa;
-use program::Program;
+use program::{Program, MatchEngine};
 use syntax;
 
 /// Type alias for representing capture indices.
@@ -240,7 +238,26 @@ impl Regex {
     ///
     /// The default size limit used in `new` is 10MB.
     pub fn with_size_limit(size: usize, re: &str) -> Result<Regex, Error> {
-        Program::new(size, re).map(Regex::Dynamic)
+        // Regex::with_engine(Some(MatchEngine::Backtrack), size, re)
+        Regex::with_engine(Some(MatchEngine::Nfa), size, re)
+    }
+
+    /// Compiles a dynamic regular expression and uses given matching engine.
+    ///
+    /// This is exposed for use in testing and shouldn't be used by clients.
+    /// Instead, the regex program should choose the correct matching engine
+    /// to use automatically. (Based on the regex, the size of the input and
+    /// the type of search.)
+    ///
+    /// A value of `None` means that the engine is automatically selected,
+    /// which is the default behavior.
+    #[doc(hidden)]
+    pub fn with_engine(
+        engine: Option<MatchEngine>,
+        size: usize,
+        re: &str,
+    ) -> Result<Regex, Error> {
+        Program::new(engine, size, re).map(Regex::Dynamic)
     }
 
 
@@ -259,7 +276,7 @@ impl Regex {
     /// # }
     /// ```
     pub fn is_match(&self, text: &str) -> bool {
-        Engine::exec(self, &mut [], text, 0)
+        exec(self, &mut [], text, 0)
     }
 
     /// Returns the start and end byte range of the leftmost-first match in
@@ -284,7 +301,7 @@ impl Regex {
     /// ```
     pub fn find(&self, text: &str) -> Option<(usize, usize)> {
         let mut caps = [None, None];
-        if Engine::exec(self, &mut caps, text, 0) {
+        if exec(self, &mut caps, text, 0) {
             Some((caps[0].unwrap(), caps[1].unwrap()))
         } else {
             None
@@ -376,7 +393,7 @@ impl Regex {
     /// accessed with `at(0)`.
     pub fn captures<'t>(&self, text: &'t str) -> Option<Captures<'t>> {
         let mut caps = self.alloc_captures();
-        if Engine::exec(self, &mut caps, text, 0) {
+        if exec(self, &mut caps, text, 0) {
             Some(Captures::new(self, text, caps))
         } else {
             None
@@ -962,7 +979,7 @@ impl<'r, 't> Iterator for FindCaptures<'r, 't> {
         }
 
         let mut caps = self.re.alloc_captures();
-        if !Engine::exec(self.re, &mut caps, self.search, self.last_end) {
+        if !exec(self.re, &mut caps, self.search, self.last_end) {
             return None
         }
         let (s, e) = (caps[0].unwrap(), caps[1].unwrap());
@@ -1007,7 +1024,7 @@ impl<'r, 't> Iterator for FindMatches<'r, 't> {
         }
 
         let mut caps = [None, None];
-        if !Engine::exec(self.re, &mut caps, self.search, self.last_end) {
+        if !exec(self.re, &mut caps, self.search, self.last_end) {
             return None;
         }
         let (s, e) = (caps[0].unwrap(), caps[1].unwrap());
@@ -1087,44 +1104,9 @@ unsafe impl<'r, 't> Searcher<'t> for RegexSearcher<'r, 't> {
     }
 }
 
-#[derive(Debug)]
-#[doc(hidden)]
-enum Engine {
-    Backtrack,
-    Nfa,
-}
-
-impl Engine {
-    fn exec(
-        re: &Regex,
-        caps: &mut CaptureIdxs,
-        text: &str,
-        s: usize,
-    ) -> bool {
-        match *re {
-            // Native is always a simple function call.
-            Regex::Native(ExNative { ref prog, .. }) => (*prog)(caps, text, s),
-            Regex::Dynamic(ref prog) => {
-                let mut engine = Engine::Nfa;
-                if prog.insts.len() <= 500 {
-                    engine = Engine::Backtrack;
-                }
-                engine.exec_one(prog, caps, text, s)
-            }
-        }
-    }
-
-    fn exec_one(
-        &self,
-        prog: &Program,
-        caps: &mut CaptureIdxs,
-        text: &str,
-        s: usize,
-    ) -> bool {
-        match *self {
-            _ => Nfa::exec(prog, caps, text, s),
-            // Engine::Backtrack => Backtrack::exec(prog, caps, text, s),
-            // Engine::Nfa => Nfa::exec(prog, caps, text, s),
-        }
+fn exec(re: &Regex, caps: &mut CaptureIdxs, text: &str, start: usize) -> bool {
+    match *re {
+        Regex::Native(ExNative { ref prog, .. }) => (*prog)(caps, text, start),
+        Regex::Dynamic(ref prog) => prog.exec(caps, text, start),
     }
 }

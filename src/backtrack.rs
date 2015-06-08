@@ -11,31 +11,43 @@
 use std::collections::HashSet;
 
 use input::{Input, InputAt, CharInput};
-use program::Program;
+use program::{Inst, InstIdx, Program};
 use re::CaptureIdxs;
 
+#[derive(Debug)]
 pub struct Backtrack<'r, 't, 'c> {
     prog: &'r Program,
     input: CharInput<'t>,
     caps: &'c mut CaptureIdxs,
+    m: BackMachine,
+}
+
+#[derive(Debug)]
+pub struct BackMachine {
     jobs: Vec<Job>,
     visited: HashSet<(usize, usize)>,
 }
 
-struct Job {
-    pc: usize,
-    at: InputAt,
-    alt: bool,
+impl BackMachine {
+    pub fn new(insts_len: usize) -> BackMachine {
+        BackMachine {
+            jobs: Vec::with_capacity(insts_len),
+            visited: HashSet::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        // self.jobs.clear();
+        unsafe { self.jobs.set_len(0); }
+        self.visited.clear();
+    }
 }
 
-impl Job {
-    fn new(pc: usize, at: InputAt) -> Job {
-        Job { pc: pc, at: at, alt: false }
-    }
-
-    fn alt(pc: usize, at: InputAt) -> Job {
-        Job { pc: pc, at: at, alt: true }
-    }
+#[derive(Clone, Copy, Debug)]
+enum Job {
+    Inst { pc: InstIdx, at: InputAt },
+    SaveRestore { slot: usize, old_pos: Option<usize> },
+    SplitNext { pc: InstIdx, at: InputAt },
 }
 
 impl<'r, 't, 'c> Backtrack<'r, 't, 'c> {
@@ -46,14 +58,18 @@ impl<'r, 't, 'c> Backtrack<'r, 't, 'c> {
         start: usize,
     ) -> bool {
         let input = CharInput::new(text);
-        let start = input.start_at(start);
-        Backtrack {
+        let start = input.at(start);
+        let mut m = prog.backtrack.get();
+        m.clear();
+        let mut b = Backtrack {
             prog: prog,
             input: input,
             caps: caps,
-            jobs: vec![],
-            visited: HashSet::new(),
-        }.exec_(start)
+            m: m,
+        };
+        let matched = b.exec_(start);
+        prog.backtrack.put(b.m);
+        matched
     }
 
     fn exec_(&mut self, mut at: InputAt) -> bool {
@@ -61,80 +77,122 @@ impl<'r, 't, 'c> Backtrack<'r, 't, 'c> {
             return if !at.is_beginning() {
                 false
             } else {
-                false
-                // match self.input.prefix_at(&self.prog.prefixes, at.pos()) {
-                    // None => false,
-                    // Some(adv) => {
-                        // let at = self.input.start_at(at.pos() + adv);
-                        // self.backtrack(at)
-                    // }
-                // }
+                match self.input.prefix_at(&self.prog.prefixes, at) {
+                    None => false,
+                    Some(at) => self.backtrack(at),
+                }
             };
         }
         loop {
-            println!("Before prefix match: {:?}", at);
-            // at = match self.input.prefix_at(&self.prog.prefixes, at.pos()) {
-                // None => return false,
-                // Some(adv) => self.input.at(at.pos() + adv),
-            // };
-            println!("Starting backtracking at: {:?}", at);
+            at = match self.input.prefix_at(&self.prog.prefixes, at) {
+                None => return false,
+                Some(at) => at,
+            };
+            // println!("Starting backtracking at: {:?}", at);
             if self.backtrack(at) {
                 return true;
             }
-            at = self.input.at(at.next_pos());
             if at.is_end() {
+                return false;
+            }
+            at = self.input.at(at.next_pos());
+        }
+    }
+
+    fn backtrack(&mut self, start: InputAt) -> bool {
+        self.push(0, start);
+        while let Some(job) = self.m.jobs.pop() {
+            match job {
+                Job::Inst { pc, at } => {
+                    if self.step(pc, at) {
+                        return true;
+                    }
+                }
+                Job::SaveRestore { slot, old_pos } => {
+                    self.caps[slot] = old_pos;
+                }
+                Job::SplitNext { pc, at } => {
+                    self.push(pc, at);
+                }
+            }
+        }
+        false
+    }
+
+    fn step(&mut self, mut pc: InstIdx, mut at: InputAt) -> bool {
+        use program::Inst::*;
+        loop {
+            match self.prog.insts[pc] {
+                Match => return true,
+                Save(slot) => {
+                    if slot < self.caps.len() {
+                        // If this path doesn't work out, then we save the old
+                        // capture index (if one exists) in an alternate
+                        // job. If the next path fails, then the alternate
+                        // job is popped and the old capture index is restored.
+                        let old_pos = self.caps[slot];
+                        self.push_save_restore(slot, old_pos);
+                        self.caps[slot] = Some(at.pos());
+                    }
+                    pc += 1;
+                }
+                Jump(pc2) => pc = pc2,
+                Split(x, y) => {
+                    self.push_split_next(y, at);
+                    pc = x;
+                }
+                EmptyLook(ref inst) => {
+                    let prev = self.input.previous_at(at.pos());
+                    if inst.matches(prev.char(), at.char()) {
+                        pc += 1;
+                    } else {
+                        return false;
+                    }
+                }
+                Char(ref inst) => {
+                    if inst.matches(at.char()) {
+                        pc += 1;
+                        at = self.input.at(at.next_pos());
+                    } else {
+                        return false;
+                    }
+                }
+                Ranges(ref inst) => {
+                    if inst.matches(at.char()).is_some() {
+                        pc += 1;
+                        at = self.input.at(at.next_pos());
+                    } else {
+                        return false;
+                    }
+                }
+            }
+            if self.has_visited(pc, at) {
                 return false;
             }
         }
     }
 
-    fn backtrack(&mut self, at: InputAt) -> bool {
-        use program::Inst::*;
-
-        self.jobs.push(Job::new(0, at));
-        while let Some(j) = self.jobs.pop() {
-            let at = j.at;
-            match self.prog.insts[j.pc] {
-                Match => return true,
-                Char(ref inst) => {
-                    println!("inst: {:?}, at: {:?}", inst, at);
-                    if inst.matches(at.char()) {
-                        println!("matched!");
-                        let at_next = self.input.at(at.next_pos());
-                        self.jobs.push(Job::new(j.pc + 1, at_next));
-                    }
-                }
-                Ranges(ref inst) => {
-                    if inst.matches(at.char()).is_some() {
-                        let at_next = self.input.at(at.next_pos());
-                        self.jobs.push(Job::new(j.pc + 1, at_next));
-                    }
-                }
-                Jump(pc) => self.jobs.push(Job::new(pc, at)),
-                EmptyLook(ref inst) => {
-                    let at_next = self.input.at(at.next_pos());
-                    println!("inst: {:?}, at: {:?}, next: {:?}",
-                             inst, at, at_next);
-                    if inst.matches(at.char(), at_next.char()) {
-                        println!("matched!");
-                        self.jobs.push(Job::new(j.pc + 1, at));
-                    }
-                }
-                Save(slot) if !j.alt => {
-                    if slot < self.caps.len() {
-                        if let Some(i) = self.caps[slot] {
-                            self.jobs.push(Job::alt(j.pc, self.input.at(i)));
-                        }
-                        self.caps[slot] = Some(at.pos());
-                    }
-                    self.jobs.push(Job::new(j.pc + 1, j.at));
-                }
-                Save(slot) if j.alt => {
-                    self.caps[slot] = Some(at.pos());
-                }
-                _ => {}
-            }
+    fn push(&mut self, pc: InstIdx, at: InputAt) {
+        if !self.has_visited(pc, at) {
+            self.m.jobs.push(Job::Inst { pc: pc, at: at });
         }
-        false
+    }
+
+    fn push_save_restore(&mut self, slot: usize, old_pos: Option<usize>) {
+        self.m.jobs.push(Job::SaveRestore { slot: slot, old_pos: old_pos });
+    }
+
+    fn push_split_next(&mut self, pc: InstIdx, at: InputAt) {
+        self.m.jobs.push(Job::SplitNext { pc: pc, at: at });
+    }
+
+    fn has_visited(&mut self, pc: InstIdx, at: InputAt) -> bool {
+        let key = (pc, at.pos());
+        if !self.m.visited.contains(&key) {
+            self.m.visited.insert(key);
+            false
+        } else {
+            true
+        }
     }
 }

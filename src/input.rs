@@ -47,7 +47,6 @@ impl InputAt {
 pub trait Input {
     fn at(&self, i: usize) -> InputAt;
     fn previous_at(&self, i: usize) -> InputAt;
-    fn start_at(&self, i: usize) -> InputAt;
     fn prefix_at(&self, prefixes: &[String], at: InputAt) -> Option<InputAt>;
 }
 
@@ -79,16 +78,6 @@ impl<'t> Input for CharInput<'t> {
     }
 
     fn previous_at(&self, i: usize) -> InputAt {
-        let c: Char = self[..i].chars().rev().next().into();
-        let len = c.len_utf8();
-        InputAt {
-            pos: i - len,
-            c: c,
-            len: len,
-        }
-    }
-
-    fn start_at(&self, i: usize) -> InputAt {
         let c: Char = self[..i].chars().rev().next().into();
         let len = c.len_utf8();
         InputAt {

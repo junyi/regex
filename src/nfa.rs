@@ -108,7 +108,8 @@ impl<'r, 't> Nfa<'r, 't> {
             let at_next = self.input.at(at.next_pos());
             for i in 0..q.clist.size {
                 let pc = q.clist.pc(i);
-                if self.step(&mut q.nlist, caps, q.clist.caps(i), pc, at, at_next) {
+                let tcaps = q.clist.caps(i);
+                if self.step(&mut q.nlist, caps, tcaps, pc, at, at_next) {
                     matched = true;
                     if caps.len() == 0 {
                         // If we only care if a match occurs (not its

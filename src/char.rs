@@ -21,6 +21,7 @@ impl Char {
     #[inline]
     pub fn is_none(self) -> bool { self.0 == u32::MAX }
 
+    #[inline(always)]
     pub fn len_utf8(self) -> usize {
         char::from_u32(self.0).map(|c| c.len_utf8()).unwrap_or(0)
     }

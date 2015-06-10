@@ -8,11 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::collections::HashSet;
-
 use input::{Input, InputAt, CharInput};
 use program::{Inst, InstIdx, Program};
 use re::CaptureIdxs;
+
+type Bits = u32;
+const BIT_SIZE: usize = 32;
 
 #[derive(Debug)]
 pub struct Backtrack<'r, 't, 'c> {
@@ -25,21 +26,15 @@ pub struct Backtrack<'r, 't, 'c> {
 #[derive(Debug)]
 pub struct BackMachine {
     jobs: Vec<Job>,
-    visited: HashSet<(usize, usize)>,
+    visited: Vec<Bits>,
 }
 
 impl BackMachine {
     pub fn new(insts_len: usize) -> BackMachine {
         BackMachine {
-            jobs: Vec::with_capacity(insts_len),
-            visited: HashSet::new(),
+            jobs: vec![],
+            visited: vec![],
         }
-    }
-
-    fn clear(&mut self) {
-        // self.jobs.clear();
-        unsafe { self.jobs.set_len(0); }
-        self.visited.clear();
     }
 }
 
@@ -47,7 +42,6 @@ impl BackMachine {
 enum Job {
     Inst { pc: InstIdx, at: InputAt },
     SaveRestore { slot: usize, old_pos: Option<usize> },
-    SplitNext { pc: InstIdx, at: InputAt },
 }
 
 impl<'r, 't, 'c> Backtrack<'r, 't, 'c> {
@@ -59,8 +53,7 @@ impl<'r, 't, 'c> Backtrack<'r, 't, 'c> {
     ) -> bool {
         let input = CharInput::new(text);
         let start = input.at(start);
-        let mut m = prog.backtrack.get();
-        m.clear();
+        let m = prog.backtrack.get();
         let mut b = Backtrack {
             prog: prog,
             input: input,
@@ -72,7 +65,24 @@ impl<'r, 't, 'c> Backtrack<'r, 't, 'c> {
         matched
     }
 
+    fn clear(&mut self) {
+        unsafe { self.m.jobs.set_len(0); }
+        let visited_len =
+            (self.prog.insts.len() * (self.input.len() + 1) + BIT_SIZE - 1)
+            /
+            BIT_SIZE;
+        let cur_visited_cap = self.m.visited.capacity();
+        if visited_len > cur_visited_cap {
+            self.m.visited.reserve_exact(visited_len - cur_visited_cap);
+        }
+        unsafe { self.m.visited.set_len(visited_len); }
+        for v in &mut self.m.visited {
+            *v = 0;
+        }
+    }
+
     fn exec_(&mut self, mut at: InputAt) -> bool {
+        self.clear();
         if self.prog.anchored_begin {
             return if !at.is_beginning() {
                 false
@@ -84,11 +94,12 @@ impl<'r, 't, 'c> Backtrack<'r, 't, 'c> {
             };
         }
         loop {
-            at = match self.input.prefix_at(&self.prog.prefixes, at) {
-                None => return false,
-                Some(at) => at,
-            };
-            // println!("Starting backtracking at: {:?}", at);
+            if !self.prog.prefixes.is_empty() {
+                at = match self.input.prefix_at(&self.prog.prefixes, at) {
+                    None => return false,
+                    Some(at) => at,
+                };
+            }
             if self.backtrack(at) {
                 return true;
             }
@@ -99,6 +110,7 @@ impl<'r, 't, 'c> Backtrack<'r, 't, 'c> {
         }
     }
 
+    #[inline(always)]
     fn backtrack(&mut self, start: InputAt) -> bool {
         self.push(0, start);
         while let Some(job) = self.m.jobs.pop() {
@@ -111,17 +123,19 @@ impl<'r, 't, 'c> Backtrack<'r, 't, 'c> {
                 Job::SaveRestore { slot, old_pos } => {
                     self.caps[slot] = old_pos;
                 }
-                Job::SplitNext { pc, at } => {
-                    self.push(pc, at);
-                }
             }
         }
         false
     }
 
+    #[inline(always)]
     fn step(&mut self, mut pc: InstIdx, mut at: InputAt) -> bool {
         use program::Inst::*;
         loop {
+            // This loop is an optimization to avoid constantly pushing/popping
+            // from the stack. Namely, if we're pushing a job only to run it
+            // next, avoid the push and just mutate `pc` (and possibly `at`)
+            // in place.
             match self.prog.insts[pc] {
                 Match => return true,
                 Save(slot) => {
@@ -138,7 +152,7 @@ impl<'r, 't, 'c> Backtrack<'r, 't, 'c> {
                 }
                 Jump(pc2) => pc = pc2,
                 Split(x, y) => {
-                    self.push_split_next(y, at);
+                    self.push(y, at);
                     pc = x;
                 }
                 EmptyLook(ref inst) => {
@@ -173,23 +187,19 @@ impl<'r, 't, 'c> Backtrack<'r, 't, 'c> {
     }
 
     fn push(&mut self, pc: InstIdx, at: InputAt) {
-        if !self.has_visited(pc, at) {
-            self.m.jobs.push(Job::Inst { pc: pc, at: at });
-        }
+        self.m.jobs.push(Job::Inst { pc: pc, at: at });
     }
 
     fn push_save_restore(&mut self, slot: usize, old_pos: Option<usize>) {
         self.m.jobs.push(Job::SaveRestore { slot: slot, old_pos: old_pos });
     }
 
-    fn push_split_next(&mut self, pc: InstIdx, at: InputAt) {
-        self.m.jobs.push(Job::SplitNext { pc: pc, at: at });
-    }
-
     fn has_visited(&mut self, pc: InstIdx, at: InputAt) -> bool {
-        let key = (pc, at.pos());
-        if !self.m.visited.contains(&key) {
-            self.m.visited.insert(key);
+        let k = pc * (self.input.len() + 1) + at.pos();
+        let k1 = k / BIT_SIZE;
+        let k2 = (1 << (k & (BIT_SIZE - 1))) as Bits;
+        if self.m.visited[k1] & k2 == 0 {
+            self.m.visited[k1] |= k2;
             false
         } else {
             true

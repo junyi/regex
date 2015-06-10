@@ -80,6 +80,7 @@ impl Inst {
 }
 
 impl OneChar {
+    #[inline(always)]
     pub fn matches(&self, c: Char) -> bool {
         self.c == c || (self.casei && self.c == c.case_fold())
     }
@@ -108,6 +109,7 @@ impl CharRanges {
         }
     }
 
+    #[inline(always)]
     pub fn matches(&self, mut c: Char) -> Option<usize> {
         if self.casei {
             c = c.case_fold();

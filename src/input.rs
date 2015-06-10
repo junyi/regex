@@ -68,6 +68,7 @@ impl<'t> ops::Deref for CharInput<'t> {
 }
 
 impl<'t> Input for CharInput<'t> {
+    #[inline(always)]
     fn at(&self, i: usize) -> InputAt {
         let c = self[i..].chars().next().into();
         InputAt {

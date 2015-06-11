@@ -14,6 +14,15 @@ use re::CaptureIdxs;
 
 type Bits = u32;
 const BIT_SIZE: usize = 32;
+const MAX_PROG_SIZE: usize = 100;
+const MAX_INPUT_SIZE: usize = 256 * (1 << 10);
+
+// Total memory usage in bytes is determined by:
+//
+//   ((len(insts) * (len(input) + 1) + bits - 1) / bits) / (bits / 8)
+//
+// With the above settings, this comes out to ~3.2MB. Mostly these numbers
+// were picked empirically with suspicious benchmarks.
 
 #[derive(Debug)]
 pub struct Backtrack<'r, 't, 'c> {
@@ -63,6 +72,10 @@ impl<'r, 't, 'c> Backtrack<'r, 't, 'c> {
         let matched = b.exec_(start);
         prog.backtrack.put(b.m);
         matched
+    }
+
+    pub fn should_exec(prog: &'r Program, input: &str) -> bool {
+        prog.insts.len() <= MAX_PROG_SIZE && input.len() <= MAX_INPUT_SIZE
     }
 
     fn clear(&mut self) {

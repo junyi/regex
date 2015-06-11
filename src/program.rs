@@ -1,4 +1,4 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
+// Copyright 2014-2015 The Rust Project Developers. See the COPYRIGHT
 // file at the top-level directory of this distribution and at
 // http://rust-lang.org/COPYRIGHT.
 //
@@ -236,16 +236,16 @@ impl Program {
         text: &str,
         start: usize,
     ) -> bool {
-        match self.choose_engine(caps.len(), text.len()) {
+        match self.choose_engine(caps.len(), text) {
             // _ => Nfa::exec(prog, caps, text, s),
             MatchEngine::Backtrack => Backtrack::exec(self, caps, text, start),
             MatchEngine::Nfa => Nfa::exec(self, caps, text, start),
         }
     }
 
-    fn choose_engine(&self, cap_len: usize, text_len: usize) -> MatchEngine {
+    fn choose_engine(&self, cap_len: usize, text: &str) -> MatchEngine {
         self.engine.unwrap_or_else(|| {
-            if self.insts.len() <= 500 {
+            if Backtrack::should_exec(self, text) {
                 MatchEngine::Backtrack
             } else {
                 MatchEngine::Nfa

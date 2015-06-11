@@ -1,7 +1,7 @@
-use std::cmp;
 use std::ops;
 
 use char::Char;
+use prefix;
 
 #[derive(Clone, Copy, Debug)]
 pub struct InputAt {
@@ -92,45 +92,8 @@ impl<'t> Input for CharInput<'t> {
         let haystack = &self.as_bytes()[at.pos()..];
         match prefixes.len() {
             0 => return Some(at), // empty prefix always matches!
-            1 => find_prefix(prefixes[0].as_bytes(), haystack),
-            _ => find_prefixes(prefixes, haystack),
+            1 => prefix::find_one(prefixes[0].as_bytes(), haystack),
+            _ => prefix::find_any(prefixes, haystack),
         }.map(|adv| self.at(at.pos() + adv))
-    }
-}
-
-pub fn find_prefix(needle: &[u8], haystack: &[u8]) -> Option<usize> {
-    let (hlen, nlen) = (haystack.len(), needle.len());
-    if nlen > hlen || nlen == 0 {
-        return None
-    }
-    for (offset, window) in haystack.windows(nlen).enumerate() {
-        if window == needle {
-            return Some(offset)
-        }
-    }
-    None
-}
-
-pub fn find_prefixes(needles: &[String], haystack: &[u8]) -> Option<usize> {
-    for hi in 0..haystack.len() {
-        for needle in needles {
-            let ub = cmp::min(hi + needle.len(), haystack.len());
-            if &haystack[hi..ub] == needle.as_bytes() {
-                return Some(hi);
-            }
-        }
-    }
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_find_prefixes() {
-        let needles = &[
-            "abaa".into(), "abbaa".into(), "abbbaa".into(), "abbbbaa".into(),
-        ];
-        let haystack = b"ababbabbbabbbabbbbabbbbaa";
-        assert_eq!(super::find_prefixes(needles, haystack), Some(18));
     }
 }

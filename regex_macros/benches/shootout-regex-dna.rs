@@ -40,7 +40,7 @@
 
 extern crate regex;
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::sync::Arc;
 use std::thread;
 use regex::NoExpand;
@@ -62,9 +62,10 @@ agggtaa[cgt]|[acg]ttaccct 5
 
 101745
 100000
-133640";
+133640
+";
     static SEQ: &'static str = include_str!("regexdna-input.txt");
-    let got = run(SEQ.to_string()).connect("\n");
+    let got = run(SEQ.to_string());
     assert_eq!(ANSWER, got);
 }
 
@@ -72,17 +73,16 @@ agggtaa[cgt]|[acg]ttaccct 5
 fn main() {
     let mut input = String::with_capacity(10 * 1024 * 1024);
     io::stdin().read_to_string(&mut input).unwrap();
-    println!("{}", run(input).connect("\n"));
+    print!("{}", run(input));
 }
 
-fn run(mut seq: String) -> Vec<String> {
+fn run(mut seq: String) -> String {
     let ilen = seq.len();
+    let mut out = ::std::io::Cursor::new(vec![]);
 
-    // println!("Fixing initial string...");
-    // println!("{}", regex!(r">[^\n]*\n|\n").captures_iter(&seq).count());
+    println!("Fixing initial string...");
     seq = regex!(">[^\n]*\n|\n").replace_all(&seq, NoExpand(""));
-    // seq = seq.replace("\n", "");
-    // println!("done.");
+    println!("done.");
     let seq_arc = Arc::new(seq.clone()); // copy before it moves
     let clen = seq.len();
 
@@ -97,7 +97,7 @@ fn run(mut seq: String) -> Vec<String> {
         regex!("agggta[cgt]a|t[acg]taccct"),
         regex!("agggtaa[cgt]|[acg]ttaccct"),
     ];
-    let (mut variant_strs, mut counts) = (vec!(), vec!());
+    let (mut variant_strs, mut counts) = (vec![], vec![]);
     for variant in variants.into_iter() {
         let seq_arc_copy = seq_arc.clone();
         variant_strs.push(variant.to_string());
@@ -124,21 +124,15 @@ fn run(mut seq: String) -> Vec<String> {
         let mut seq = seq;
         for (re, replacement) in substs.into_iter() {
             println!("replacement {}", re);
-            // println!("count: {}", re.captures_iter(&seq).count());
             seq = re.replace_all(&seq, NoExpand(replacement));
         }
         println!("done replacements!");
         seq.len()
     };
 
-    let mut olines = Vec::new();
     for (variant, count) in variant_strs.iter().zip(counts.into_iter()) {
-        olines.push(format!("{} {}", variant, count.join().unwrap()));
+        writeln!(&mut out, "{} {}", variant, count.join().unwrap()).unwrap();
     }
-    olines.push("".to_string());
-    olines.push(format!("{}", ilen));
-    olines.push(format!("{}", clen));
-    // olines.push(format!("{}", seqlen.join().unwrap()));
-    olines.push(format!("{}", seqlen));
-    olines
+    writeln!(&mut out, "\n{}\n{}\n{}", ilen, clen, seqlen).unwrap();
+    String::from_utf8(out.into_inner()).unwrap()
 }

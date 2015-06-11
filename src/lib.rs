@@ -395,6 +395,7 @@
        html_favicon_url = "http://www.rust-lang.org/favicon.ico",
        html_root_url = "http://doc.rust-lang.org/regex/")]
 
+extern crate libc;
 extern crate regex_syntax as syntax;
 
 pub use program::MatchEngine; // exported for testing
@@ -410,6 +411,7 @@ mod char;
 mod compile;
 mod input;
 mod pool;
+mod prefix;
 mod program;
 mod nfa;
 mod re;
